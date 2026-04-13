@@ -1,0 +1,8 @@
+streamlit
+pandas
+plotly.express
+io
+base64
+requests
+json
+uuid
