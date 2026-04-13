@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import timedelta, date
+from datetime import timedelta
 import plotly.express as px
 import io
 import base64
@@ -32,7 +32,6 @@ def get_github_headers():
     return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
 def get_file_from_github(path):
-    """Baixa um arquivo do repositório. Retorna (bytes, sha) ou (None, None)."""
     token, repo, branch = get_github_config()
     if not token:
         return None, None
@@ -45,7 +44,6 @@ def get_file_from_github(path):
     return None, None
 
 def save_file_to_github(path, content_bytes, message):
-    """Salva ou atualiza um arquivo no repositório."""
     token, repo, branch = get_github_config()
     if not token:
         return False
@@ -62,7 +60,6 @@ def save_file_to_github(path, content_bytes, message):
     return r.status_code in [200, 201]
 
 def delete_file_from_github(path, message):
-    """Deleta um arquivo do repositório."""
     token, repo, branch = get_github_config()
     if not token:
         return False
@@ -93,38 +90,50 @@ def load_campanhas_meta():
     content, _ = get_file_from_github(META_PATH)
     if content:
         return parquet_bytes_to_df(content)
-    return pd.DataFrame(columns=['id', 'nome', 'criado_em', 'total_envios'])
+    return pd.DataFrame(columns=['id', 'nome', 'criado_em', 'total_envios', 'total_clientes'])
 
-def save_campanha(nome, df_envios):
-    """Cria uma nova campanha e salva os envios no GitHub."""
+def save_campanha(nome, df_envios, df_clientes):
     campanha_id = str(uuid.uuid4())[:8]
-    envios_path = f"data/campanhas/{campanha_id}_envios.parquet"
 
-    ok = save_file_to_github(
-        envios_path,
+    ok_envios = save_file_to_github(
+        f"data/campanhas/{campanha_id}_envios.parquet",
         df_to_parquet_bytes(df_envios),
         f"Campanha {nome}: envios"
     )
-    if not ok:
+    if not ok_envios:
         return None, "Erro ao salvar envios no GitHub."
+
+    ok_clientes = save_file_to_github(
+        f"data/campanhas/{campanha_id}_clientes.parquet",
+        df_to_parquet_bytes(df_clientes),
+        f"Campanha {nome}: clientes"
+    )
+    if not ok_clientes:
+        return None, "Envios salvos, mas erro ao salvar clientes no GitHub."
 
     df_meta = load_campanhas_meta()
     nova = pd.DataFrame([{
-        'id':           campanha_id,
-        'nome':         nome,
-        'criado_em':    pd.Timestamp.now(),
-        'total_envios': df_envios['TELEFONE_ENVIO'].nunique()
+        'id':             campanha_id,
+        'nome':           nome,
+        'criado_em':      pd.Timestamp.now(),
+        'total_envios':   df_envios['TELEFONE_ENVIO'].nunique(),
+        'total_clientes': len(df_clientes)
     }])
     df_meta = pd.concat([df_meta, nova], ignore_index=True)
-    ok2 = save_file_to_github(META_PATH, df_to_parquet_bytes(df_meta), f"Meta: campanha {nome} criada")
-    if not ok2:
-        return None, "Envios salvos, mas erro ao salvar metadados."
+    ok_meta = save_file_to_github(META_PATH, df_to_parquet_bytes(df_meta), f"Meta: campanha {nome} criada")
+    if not ok_meta:
+        return None, "Arquivos salvos, mas erro ao salvar metadados."
 
     return campanha_id, None
 
 def load_campanha_envios(campanha_id):
-    path = f"data/campanhas/{campanha_id}_envios.parquet"
-    content, _ = get_file_from_github(path)
+    content, _ = get_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet")
+    if content:
+        return parquet_bytes_to_df(content)
+    return None
+
+def load_campanha_clientes(campanha_id):
+    content, _ = get_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet")
     if content:
         return parquet_bytes_to_df(content)
     return None
@@ -133,7 +142,8 @@ def delete_campanha(campanha_id, nome):
     df_meta = load_campanhas_meta()
     df_meta = df_meta[df_meta['id'] != campanha_id]
     save_file_to_github(META_PATH, df_to_parquet_bytes(df_meta), f"Meta: campanha {nome} removida")
-    delete_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet", f"Campanha {nome}: envios removidos")
+    delete_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet",   f"Campanha {nome}: envios removidos")
+    delete_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet", f"Campanha {nome}: clientes removidos")
 
 # ══════════════════════════════════════════════════════════════
 # FUNÇÕES DE PAGAMENTOS
@@ -146,7 +156,6 @@ def load_pagamentos_github():
     return None
 
 def update_pagamentos_github(df_novo):
-    """Atualiza a base de pagamentos no GitHub sem duplicidades."""
     df_existente = load_pagamentos_github()
     if df_existente is not None and not df_existente.empty:
         df_combined = pd.concat([df_existente, df_novo], ignore_index=True)
@@ -156,20 +165,23 @@ def update_pagamentos_github(df_novo):
         )
     else:
         df_combined = df_novo.copy()
-
     total_antes = len(df_existente) if df_existente is not None else 0
     novos = len(df_combined) - total_antes
     ok = save_file_to_github(PAG_PATH, df_to_parquet_bytes(df_combined), "Pagamentos: atualização")
     return ok, len(df_combined), novos
 
 # ══════════════════════════════════════════════════════════════
-# FUNÇÕES DE PROCESSAMENTO (INALTERADAS)
+# CONFIGURAÇÃO DA PÁGINA
 # ══════════════════════════════════════════════════════════════
 
 st.set_page_config(layout="wide", page_title="Análise de campanha de cobrança")
 
 st.title("📊 Análise de eficiência de campanha de cobrança via Whatsapp")
 st.markdown("Faça o upload dos seus arquivos para analisar a performance da campanha de notificações.")
+
+# ══════════════════════════════════════════════════════════════
+# FUNÇÕES DE PROCESSAMENTO (INALTERADAS)
+# ══════════════════════════════════════════════════════════════
 
 @st.cache_data
 def load_and_process_envios(uploaded_file):
@@ -236,6 +248,8 @@ def load_and_process_pagamentos(uploaded_file):
                 except Exception:
                     uploaded_file.seek(0)
                     continue
+            if df is None:
+                raise ValueError("Não foi possível ler o arquivo CSV com as codificações tentadas.")
         elif uploaded_file.name.endswith('.xlsx'):
             df = pd.read_excel(uploaded_file, header=None)
         else:
@@ -351,7 +365,10 @@ def load_and_process_clientes(uploaded_file):
         return None
 
 def fmt_brl(valor):
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    try:
+        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except (ValueError, TypeError):
+        return "R$ 0,00"
 
 def add_bar_labels(fig, formato='valor'):
     for trace in fig.data:
@@ -359,7 +376,10 @@ def add_bar_labels(fig, formato='valor'):
             if formato == 'valor':
                 texts = [fmt_brl(v) if v is not None else '' for v in trace.y]
             else:
-                texts = [str(int(v)) if v is not None else '' for v in trace.y]
+                try:
+                    texts = [str(int(v)) if v is not None else '' for v in trace.y]
+                except (ValueError, TypeError):
+                    texts = ['' for _ in trace.y]
             trace.text = texts
             trace.textposition = 'outside'
             trace.textfont = dict(size=11)
@@ -373,108 +393,126 @@ def add_bar_labels(fig, formato='valor'):
 token, repo, branch = get_github_config()
 github_ok = token is not None
 
-# ── Gestão de Campanhas ───────────────────────────────────────
 if github_ok:
     st.sidebar.success(f"✅ GitHub: `{repo}`")
-    st.sidebar.markdown("---")
-    st.sidebar.header("📋 Campanhas")
+else:
+    st.sidebar.warning("⚠️ GitHub não configurado. Configure em `.streamlit/secrets.toml`.")
 
-    df_meta = load_campanhas_meta()
-    campanhas_disponiveis = df_meta['nome'].tolist() if not df_meta.empty else []
+# ── Gestão de Campanhas ───────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.header("📋 Campanhas")
 
-    campanha_selecionada_nome = st.sidebar.selectbox(
-        "Selecionar campanha salva",
-        options=["(nenhuma)"] + campanhas_disponiveis
+df_meta = load_campanhas_meta() if github_ok else pd.DataFrame(columns=['id','nome','criado_em','total_envios','total_clientes'])
+campanhas_disponiveis = df_meta['nome'].tolist() if not df_meta.empty else []
+
+campanha_selecionada_nome = st.sidebar.selectbox(
+    "Selecionar campanha salva",
+    options=["(nenhuma)"] + campanhas_disponiveis
+)
+
+campanha_selecionada = None
+if campanha_selecionada_nome != "(nenhuma)" and not df_meta.empty:
+    campanha_selecionada = df_meta[df_meta['nome'] == campanha_selecionada_nome].iloc[0]
+    st.sidebar.caption(
+        f"Envios: {int(campanha_selecionada['total_envios']):,} | "
+        f"Clientes: {int(campanha_selecionada['total_clientes']):,} | "
+        f"Criada em: {pd.to_datetime(campanha_selecionada['criado_em']).strftime('%d/%m/%Y')}"
     )
+    if st.sidebar.button("🗑️ Excluir esta campanha"):
+        delete_campanha(campanha_selecionada['id'], campanha_selecionada_nome)
+        st.sidebar.success(f"Campanha '{campanha_selecionada_nome}' excluída.")
+        st.rerun()
 
-    campanha_selecionada = None
-    if campanha_selecionada_nome != "(nenhuma)" and not df_meta.empty:
-        campanha_selecionada = df_meta[df_meta['nome'] == campanha_selecionada_nome].iloc[0]
-        st.sidebar.caption(f"Envios: {int(campanha_selecionada['total_envios']):,} | Criada em: {pd.to_datetime(campanha_selecionada['criado_em']).strftime('%d/%m/%Y')}")
-
-        if st.sidebar.button("🗑️ Excluir esta campanha", type="secondary"):
-            delete_campanha(campanha_selecionada['id'], campanha_selecionada_nome)
-            st.rerun()
-
+# ── Nova Campanha ─────────────────────────────────────────────
+if github_ok:
     with st.sidebar.expander("➕ Salvar nova campanha"):
-        novo_nome = st.text_input("Nome da campanha")
-        st.caption("Faça o upload da base de envios abaixo e clique em Salvar.")
+        nome_nova_campanha = st.text_input("Nome da campanha")
+        st.caption("Faça o upload dos arquivos abaixo antes de salvar.")
         if st.button("💾 Salvar campanha"):
-            if not novo_nome:
-                st.warning("Informe o nome da campanha.")
-            elif 'df_envios_temp' not in st.session_state or st.session_state.df_envios_temp is None:
-                st.warning("Processe a base de envios primeiro usando o uploader abaixo.")
+            if not nome_nova_campanha.strip():
+                st.error("Informe um nome para a campanha.")
+            elif df_envios is None:
+                st.error("Faça o upload da base de envios primeiro.")
+            elif df_clientes is None:
+                st.error("Faça o upload da base de clientes primeiro.")
             else:
-                with st.spinner("Salvando no GitHub..."):
-                    cid, erro = save_campanha(novo_nome, st.session_state.df_envios_temp)
+                with st.spinner("Salvando campanha no GitHub..."):
+                    cid, erro = save_campanha(nome_nova_campanha.strip(), df_envios, df_clientes)
                 if erro:
                     st.error(erro)
                 else:
-                    st.success(f"Campanha '{novo_nome}' salva!")
+                    st.success(f"Campanha '{nome_nova_campanha}' salva com ID `{cid}`!")
                     st.rerun()
 
-    # Atualizar base de pagamentos no GitHub
-    st.sidebar.markdown("---")
-    st.sidebar.header("💳 Pagamentos no GitHub")
-    pag_github = load_pagamentos_github()
-    if pag_github is not None:
-        st.sidebar.info(f"Base atual: {len(pag_github):,} registros")
-    if st.sidebar.button("⬆️ Enviar pagamentos para o GitHub"):
-        if 'df_pagamentos_temp' not in st.session_state or st.session_state.df_pagamentos_temp is None:
-            st.sidebar.warning("Processe a base de pagamentos primeiro.")
-        else:
-            with st.sidebar.spinner("Atualizando no GitHub..."):
-                ok, total, novos = update_pagamentos_github(st.session_state.df_pagamentos_temp)
-            if ok:
-                st.sidebar.success(f"Atualizado! {novos} novos registros. Total: {total:,}")
+# ── Atualizar Pagamentos no GitHub ───────────────────────────
+if github_ok:
+    with st.sidebar.expander("💰 Atualizar base de pagamentos"):
+        st.caption("Envia os pagamentos processados para o repositório, sem duplicar registros existentes.")
+        if st.button("⬆️ Enviar pagamentos para o GitHub"):
+            if df_pagamentos is None:
+                st.error("Faça o upload da base de pagamentos primeiro.")
             else:
-                st.sidebar.error("Erro ao salvar pagamentos no GitHub.")
+                with st.spinner("Atualizando pagamentos no GitHub..."):
+                    ok, total, novos = update_pagamentos_github(df_pagamentos)
+                if ok:
+                    st.success(f"Base atualizada! Total: {total:,} registros | Novos: {novos:,}")
+                else:
+                    st.error("Erro ao salvar pagamentos no GitHub.")
 
-else:
-    st.sidebar.warning("⚠️ GitHub não configurado. Configure em `.streamlit/secrets.toml` para habilitar o armazenamento de campanhas.")
+# ── Carregar do GitHub ────────────────────────────────────────
+if github_ok:
+    with st.sidebar.expander("☁️ Usar pagamentos do GitHub"):
+        pag_github = load_pagamentos_github()
+        if pag_github is not None:
+            st.caption(f"Base disponível: {len(pag_github):,} registros")
+            if st.button("📥 Carregar pagamentos do GitHub"):
+                st.session_state['df_pagamentos_github'] = pag_github
+                st.success("Pagamentos carregados do GitHub!")
+        else:
+            st.caption("Nenhuma base de pagamentos salva no GitHub.")
 
-# ── Upload de Arquivos ────────────────────────────────────────
+# ── Upload de arquivos ────────────────────────────────────────
 st.sidebar.markdown("---")
-st.sidebar.header("Upload de Arquivos")
-uploaded_envios     = st.sidebar.file_uploader("1. Base de Envios (Notificações - .xlsx)", type=["xlsx"])
+st.sidebar.header("📁 Upload de Arquivos")
+uploaded_envios     = st.sidebar.file_uploader("1. Base de Envios (.xlsx)", type=["xlsx"])
 uploaded_pagamentos = st.sidebar.file_uploader("2. Base de Pagamentos (.csv, .xlsx ou .parquet)", type=["csv", "xlsx", "parquet"])
-uploaded_clientes   = st.sidebar.file_uploader("3. Base de Identificação de Clientes (.xlsx)", type=["xlsx"])
+uploaded_clientes   = st.sidebar.file_uploader("3. Base de Clientes (.xlsx)", type=["xlsx"])
 
-st.sidebar.header("Configurações da Análise")
-janela_dias = st.sidebar.slider("Janela de dias para considerar o pagamento após o envio da notificação:", 0, 30, 7)
+st.sidebar.header("⚙️ Configurações da Análise")
+janela_dias = st.sidebar.slider(
+    "Janela de dias para considerar o pagamento após o envio:",
+    0, 30, 7
+)
 
 executar_analise = st.sidebar.button("▶️ Executar Análise")
 
+# ── Resolver fontes de dados ──────────────────────────────────
 df_envios     = None
 df_pagamentos = None
 df_clientes   = None
 
+# Campanha selecionada carrega envios e clientes do GitHub
+if campanha_selecionada is not None:
+    with st.spinner("Carregando dados da campanha do GitHub..."):
+        df_envios   = load_campanha_envios(campanha_selecionada['id'])
+        df_clientes = load_campanha_clientes(campanha_selecionada['id'])
+    if df_envios is not None:
+        st.sidebar.success(f"✅ Envios carregados do GitHub ({len(df_envios):,} registros)")
+    if df_clientes is not None:
+        st.sidebar.success(f"✅ Clientes carregados do GitHub ({len(df_clientes):,} registros)")
+
+# Upload local sobrescreve o GitHub se fornecido
 if uploaded_envios:
     df_envios = load_and_process_envios(uploaded_envios)
-    if github_ok:
-        st.session_state.df_envios_temp = df_envios
-
-if uploaded_pagamentos:
-    df_pagamentos = load_and_process_pagamentos(uploaded_pagamentos)
-    if github_ok:
-        st.session_state.df_pagamentos_temp = df_pagamentos
-
 if uploaded_clientes:
     df_clientes = load_and_process_clientes(uploaded_clientes)
 
-# Se campanha salva selecionada e sem upload de envios, usa envios do GitHub
-if github_ok and campanha_selecionada is not None and df_envios is None:
-    with st.spinner("Carregando envios da campanha..."):
-        df_envios = load_campanha_envios(campanha_selecionada['id'])
-    if df_envios is not None:
-        st.sidebar.info(f"Usando envios: '{campanha_selecionada_nome}'")
-
-# Se sem upload de pagamentos, usa base do GitHub
-if github_ok and df_pagamentos is None:
-    df_pag_gh = load_pagamentos_github()
-    if df_pag_gh is not None:
-        df_pagamentos = df_pag_gh
-        st.sidebar.info(f"Usando pagamentos do GitHub ({len(df_pagamentos):,} registros)")
+# Pagamentos: prioridade para upload local, depois session_state, depois GitHub
+if uploaded_pagamentos:
+    df_pagamentos = load_and_process_pagamentos(uploaded_pagamentos)
+elif 'df_pagamentos_github' in st.session_state:
+    df_pagamentos = st.session_state['df_pagamentos_github']
+    st.sidebar.info(f"Usando pagamentos do GitHub ({len(df_pagamentos):,} registros)")
 
 if st.sidebar.checkbox("Mostrar pré-visualização dos dados processados"):
     if df_envios is not None:
@@ -488,7 +526,7 @@ if st.sidebar.checkbox("Mostrar pré-visualização dos dados processados"):
         st.dataframe(df_clientes.head())
 
 # ══════════════════════════════════════════════════════════════
-# ANÁLISE — LÓGICA INALTERADA
+# ANÁLISE PRINCIPAL (inalterada)
 # ══════════════════════════════════════════════════════════════
 
 if executar_analise:
@@ -564,71 +602,65 @@ if executar_analise:
 
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Total de clientes notificados", f"{total_clientes_notificados}")
+                    st.metric("Total de clientes notificados", f"{total_clientes_notificados:,}")
                 with col2:
-                    st.metric("Clientes que pagaram na janela", f"{clientes_que_pagaram_matriculas}")
+                    st.metric("Clientes que pagaram na janela", f"{clientes_que_pagaram_matriculas:,}")
                 with col3:
                     st.metric("Taxa de eficiência (clientes)", f"{taxa_eficiencia_clientes:,.2f}%".replace(",", "X").replace(".", ",").replace("X", "."))
 
                 col4, col5, col6 = st.columns(3)
                 with col4:
-                    st.metric("Valor total arrecadado na campanha", f"R$ {valor_total_arrecadado:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    st.metric("Valor total arrecadado na campanha", fmt_brl(valor_total_arrecadado))
                 with col5:
-                    st.metric("Total da dívida dos notificados", f"R$ {total_divida_notificados:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                with col6:
                     st.metric("Taxa de eficiência (valor)", f"{taxa_eficiencia_valor:,.2f}%".replace(",", "X").replace(".", ",").replace("X", "."))
+                with col6:
+                    st.metric("Ticket médio por cliente", fmt_brl(ticket_medio))
 
-                col7, col8, col9 = st.columns(3)
+                col7, col8 = st.columns(2)
                 with col7:
-                    st.metric("Ticket médio", f"R$ {ticket_medio:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    st.metric("Custo estimado da campanha (R$ 0,05/msg)", fmt_brl(custo_campanha))
                 with col8:
-                    st.metric("Custo da campanha", f"R$ {custo_campanha:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                with col9:
-                    st.metric("ROI", f"{roi:,.2f}%".replace(",", "X").replace(".", ",").replace("X", "."))
+                    st.metric("ROI da campanha", f"{roi:,.2f}%".replace(",", "X").replace(".", ",").replace("X", "."))
 
                 if not df_pagamentos_campanha.empty:
-                    st.subheader(f"Pagamentos por Dia Após o Envio (Janela de {janela_dias} dias)")
+                    st.subheader("Pagamentos ao Longo do Tempo")
 
-                    pagamentos_por_dia = df_pagamentos_campanha.groupby('DIAS_APOS_ENVIO')['VALOR_PAGO'].sum().reset_index()
-                    pagamentos_por_dia.rename(columns={'DIAS_APOS_ENVIO': 'Dias Após Envio', 'VALOR_PAGO': 'Valor Total Pago'}, inplace=True)
+                    pagamentos_por_dia = df_pagamentos_campanha.groupby('DATA_PAGAMENTO').agg(
+                        Valor_Pago=('VALOR_PAGO', 'sum'),
+                        Quantidade=('MATRICULA', 'count')
+                    ).reset_index()
 
-                    fig_dias = px.bar(
+                    fig_linha = px.line(
                         pagamentos_por_dia,
-                        x='Dias Após Envio', y='Valor Total Pago',
-                        title='Valor Arrecadado por Dia Após o Envio',
-                        labels={'Dias Após Envio': 'Dias Após o Envio', 'Valor Total Pago': 'Valor Total Pago (R$)'},
-                        hover_data={'Valor Total Pago': ':.2f'}
+                        x='DATA_PAGAMENTO', y='Valor_Pago',
+                        title='Valor Pago ao Longo do Tempo',
+                        labels={'DATA_PAGAMENTO': 'Data do Pagamento', 'Valor_Pago': 'Valor Pago (R$)'},
+                        markers=True
                     )
-                    fig_dias.update_layout(xaxis_title="Dias Após o Envio", yaxis_title="Valor Total Pago (R$)")
-                    st.plotly_chart(fig_dias, use_container_width=True, key="fig_dias")
+                    fig_linha.update_layout(xaxis_title="Data do Pagamento", yaxis_title="Valor Pago (R$)")
+                    st.plotly_chart(fig_linha, use_container_width=True, key="fig_linha")
 
-                    tab_dias = pagamentos_por_dia.copy()
-                    tab_dias['Valor Total Pago'] = tab_dias['Valor Total Pago'].apply(fmt_brl)
-                    st.dataframe(tab_dias, use_container_width=True, hide_index=True)
+                    st.subheader("Distribuição dos Pagamentos por Dia após o Envio")
+                    dist_dias = df_pagamentos_campanha.groupby('DIAS_APOS_ENVIO').agg(
+                        Quantidade=('MATRICULA', 'count'),
+                        Valor_Pago=('VALOR_PAGO', 'sum')
+                    ).reset_index()
 
-                    if 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
-                        st.subheader("Valor Arrecadado por Canal de Pagamento")
+                    fig_dist = px.bar(
+                        dist_dias,
+                        x='DIAS_APOS_ENVIO', y='Valor_Pago',
+                        title='Valor Pago por Dia após o Envio da Notificação',
+                        labels={'DIAS_APOS_ENVIO': 'Dias após o Envio', 'Valor_Pago': 'Valor Pago (R$)'},
+                        hover_data={'Quantidade': True}
+                    )
+                    fig_dist = add_bar_labels(fig_dist, 'valor')
+                    fig_dist.update_layout(xaxis_title="Dias após o Envio", yaxis_title="Valor Pago (R$)")
+                    st.plotly_chart(fig_dist, use_container_width=True, key="fig_dist")
 
-                        pagamentos_por_canal = df_pagamentos_campanha.groupby('TIPO_PAGAMENTO')['VALOR_PAGO'].sum().reset_index()
-                        pagamentos_por_canal = pagamentos_por_canal.sort_values('VALOR_PAGO', ascending=False)
-
-                        fig_canal = px.bar(
-                            pagamentos_por_canal,
-                            x='TIPO_PAGAMENTO', y='VALOR_PAGO',
-                            title='Valor Arrecadado por Canal de Pagamento',
-                            labels={'TIPO_PAGAMENTO': 'Canal de Pagamento', 'VALOR_PAGO': 'Valor Total Pago (R$)'},
-                            color='TIPO_PAGAMENTO',
-                            hover_data={'VALOR_PAGO': ':.2f'}
-                        )
-                        fig_canal.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Valor Total Pago (R$)", showlegend=False)
-                        st.plotly_chart(fig_canal, use_container_width=True, key="fig_canal_aba1")
-
-                        tab_canal_v1 = pagamentos_por_canal.copy()
-                        tab_canal_v1.columns = ['Canal de Pagamento', 'Valor Total Pago']
-                        tab_canal_v1['Valor Total Pago'] = tab_canal_v1['Valor Total Pago'].apply(fmt_brl)
-                        st.dataframe(tab_canal_v1, use_container_width=True, hide_index=True)
-                else:
-                    st.info("Nenhum pagamento encontrado dentro da janela definida para a campanha.")
+                    tab_dist = dist_dias.copy()
+                    tab_dist.columns = ['Dias após o Envio', 'Quantidade de Pagamentos', 'Valor Pago']
+                    tab_dist['Valor Pago'] = tab_dist['Valor Pago'].apply(fmt_brl)
+                    st.dataframe(tab_dist, use_container_width=True, hide_index=True)
 
             # ══════════════════════════════════════════════════
             # ABA 2 — CIDADE E DIRETORIA
@@ -653,6 +685,7 @@ if executar_analise:
                             labels={'CIDADE': 'Cidade', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
                             hover_data={'Valor_Arrecadado': ':.2f'}
                         )
+                        fig_cidade_valor = add_bar_labels(fig_cidade_valor, 'valor')
                         fig_cidade_valor.update_layout(xaxis_title="Cidade", yaxis_title="Valor Arrecadado (R$)")
                         st.plotly_chart(fig_cidade_valor, use_container_width=True, key="fig_cidade_valor")
 
@@ -662,6 +695,7 @@ if executar_analise:
                             title='Clientes que Pagaram por Cidade',
                             labels={'CIDADE': 'Cidade', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
                         )
+                        fig_cidade_clientes = add_bar_labels(fig_cidade_clientes, 'qtd')
                         fig_cidade_clientes.update_layout(xaxis_title="Cidade", yaxis_title="Clientes que Pagaram")
                         st.plotly_chart(fig_cidade_clientes, use_container_width=True, key="fig_cidade_clientes")
 
@@ -704,6 +738,7 @@ if executar_analise:
                             labels={'DIRETORIA': 'Diretoria', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
                             hover_data={'Valor_Arrecadado': ':.2f'}
                         )
+                        fig_diretoria_valor = add_bar_labels(fig_diretoria_valor, 'valor')
                         fig_diretoria_valor.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Arrecadado (R$)")
                         st.plotly_chart(fig_diretoria_valor, use_container_width=True, key="fig_diretoria_valor")
 
@@ -713,6 +748,7 @@ if executar_analise:
                             title='Clientes que Pagaram por Diretoria',
                             labels={'DIRETORIA': 'Diretoria', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
                         )
+                        fig_diretoria_clientes = add_bar_labels(fig_diretoria_clientes, 'qtd')
                         fig_diretoria_clientes.update_layout(xaxis_title="Diretoria", yaxis_title="Clientes que Pagaram")
                         st.plotly_chart(fig_diretoria_clientes, use_container_width=True, key="fig_diretoria_clientes")
 
@@ -791,6 +827,7 @@ if executar_analise:
                             labels={'FAIXA_ANTIGUIDADE': 'Faixa de Antiguidade', 'Valor_Pago': 'Valor Pago (R$)'},
                             hover_data={'Valor_Pago': ':.2f'}
                         )
+                        fig_ant_valor = add_bar_labels(fig_ant_valor, 'valor')
                         fig_ant_valor.update_layout(xaxis_title="Faixa de Antiguidade", yaxis_title="Valor Pago (R$)")
                         st.plotly_chart(fig_ant_valor, use_container_width=True, key="fig_ant_valor")
 
@@ -800,6 +837,7 @@ if executar_analise:
                             title='Quantidade de Pagamentos por Faixa de Antiguidade',
                             labels={'FAIXA_ANTIGUIDADE': 'Faixa de Antiguidade', 'Quantidade': 'Quantidade de Pagamentos'}
                         )
+                        fig_ant_qtd = add_bar_labels(fig_ant_qtd, 'qtd')
                         fig_ant_qtd.update_layout(xaxis_title="Faixa de Antiguidade", yaxis_title="Quantidade de Pagamentos")
                         st.plotly_chart(fig_ant_qtd, use_container_width=True, key="fig_ant_qtd")
 
@@ -823,6 +861,7 @@ if executar_analise:
                             labels={'MES_ANO_FATURA': 'Mês/Ano da Fatura', 'VALOR_PAGO': 'Valor Pago (R$)'},
                             hover_data={'VALOR_PAGO': ':.2f'}
                         )
+                        fig_mes_ano = add_bar_labels(fig_mes_ano, 'valor')
                         fig_mes_ano.update_layout(xaxis_title="Mês/Ano da Fatura", yaxis_title="Valor Pago (R$)")
                         st.plotly_chart(fig_mes_ano, use_container_width=True, key="fig_mes_ano")
 
@@ -847,6 +886,7 @@ if executar_analise:
                             color='TIPO_FATURA',
                             hover_data={'Valor_Pago': ':.2f', 'Quantidade': True}
                         )
+                        fig_tipo_fatura = add_bar_labels(fig_tipo_fatura, 'valor')
                         fig_tipo_fatura.update_layout(xaxis_title="Tipo de Fatura", yaxis_title="Valor Pago (R$)", showlegend=False)
                         st.plotly_chart(fig_tipo_fatura, use_container_width=True, key="fig_tipo_fatura")
 
@@ -871,6 +911,7 @@ if executar_analise:
                             color='UTILIZACAO',
                             hover_data={'Valor_Pago': ':.2f', 'Quantidade': True}
                         )
+                        fig_utilizacao = add_bar_labels(fig_utilizacao, 'valor')
                         fig_utilizacao.update_layout(xaxis_title="Utilização", yaxis_title="Valor Pago (R$)", showlegend=False)
                         st.plotly_chart(fig_utilizacao, use_container_width=True, key="fig_utilizacao")
 
@@ -901,6 +942,7 @@ if executar_analise:
                         color='TIPO_PAGAMENTO',
                         hover_data={'VALOR_PAGO': ':.2f'}
                     )
+                    fig_canal = add_bar_labels(fig_canal, 'valor')
                     fig_canal.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Valor Total Pago (R$)", showlegend=False)
                     st.plotly_chart(fig_canal, use_container_width=True, key="fig_canal_aba4")
 
@@ -917,6 +959,7 @@ if executar_analise:
                         labels={'TIPO_PAGAMENTO': 'Canal de Pagamento', 'Clientes que Pagaram': 'Clientes que Pagaram'},
                         color='TIPO_PAGAMENTO'
                     )
+                    fig_canal_qtd = add_bar_labels(fig_canal_qtd, 'qtd')
                     fig_canal_qtd.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Clientes que Pagaram", showlegend=False)
                     st.plotly_chart(fig_canal_qtd, use_container_width=True, key="fig_canal_qtd")
 
@@ -947,7 +990,7 @@ if executar_analise:
                         subset=['MATRICULA', 'DATA_PAGAMENTO', 'VALOR_PAGO']
                     )
 
-                    st.dataframe(df_detalhes)
+                    st.dataframe(df_detalhes, use_container_width=True, hide_index=True)
 
                     csv_output = df_detalhes.to_csv(index=False, sep=';', decimal=',')
                     st.download_button(
@@ -963,3 +1006,5 @@ if executar_analise:
             st.error("Não foi possível processar um ou mais arquivos. Verifique os formatos e as colunas esperadas ou se há matrículas válidas após o cruzamento.")
     else:
         st.warning("Por favor, carregue todos os três arquivos para iniciar a análise.")
+
+
