@@ -1,8 +1,7 @@
 streamlit
 pandas
-plotly.express
-io
-base64
+plotly
 requests
-json
-uuid
+openpyxl
+pyarrow
+
