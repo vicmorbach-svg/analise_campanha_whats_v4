@@ -185,7 +185,7 @@ def delete_campanha(campanha_id, nome):
 # PAGAMENTOS
 # ══════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=300)
+
 def load_pagamentos_github():
     content, _ = get_file_from_github(PAG_PATH)
     if content:
@@ -205,7 +205,6 @@ def update_pagamentos_github(df_novo):
     total_antes = len(df_existente) if df_existente is not None else 0
     novos       = len(df_combined) - total_antes
     ok = save_file_to_github(PAG_PATH, df_to_parquet_bytes(df_combined), "Pagamentos: atualização")
-    load_pagamentos_github.clear()
     return ok, len(df_combined), novos
 
 # ══════════════════════════════════════════════════════════════
@@ -599,14 +598,29 @@ df_envios     = None
 df_clientes   = None
 df_pagamentos = None
 
-# Carrega envios e clientes da campanha selecionada
+# Carrega pagamentos do GitHub automaticamente sempre
+df_pagamentos = load_pagamentos_github()
+if df_pagamentos is not None:
+    st.sidebar.success(f"✅ Pagamentos carregados ({len(df_pagamentos):,} registros)")
+else:
+    if is_admin():
+        st.sidebar.warning("⚠️ Base de pagamentos não encontrada. Faça o upload na seção Administração.")
+    else:
+        st.sidebar.warning("⚠️ Base de pagamentos indisponível. Contate o administrador.")
+
+# Carrega campanha selecionada do GitHub
 if campanha_selecionada is not None:
     with st.spinner("Carregando dados da campanha..."):
         df_envios   = load_campanha_envios(campanha_selecionada['id'])
         df_clientes = load_campanha_clientes(campanha_selecionada['id'])
-
-# Pagamentos sempre do GitHub (cache de 5 min)
-df_pagamentos = load_pagamentos_github()
+    if df_envios is not None:
+        st.sidebar.success(f"✅ Envios carregados ({len(df_envios):,} registros)")
+    else:
+        st.sidebar.error("Erro ao carregar envios da campanha.")
+    if df_clientes is not None:
+        st.sidebar.success(f"✅ Clientes carregados ({len(df_clientes):,} registros)")
+    else:
+        st.sidebar.error("Erro ao carregar clientes da campanha.")
 
 # Validação e feedback
 dados_prontos = (
@@ -615,12 +629,15 @@ dados_prontos = (
     df_pagamentos is not None
 )
 
-if campanha_selecionada is None:
-    st.info("Selecione uma campanha na barra lateral para iniciar a análise.")
-elif df_envios is None or df_clientes is None:
-    st.error("Não foi possível carregar os dados da campanha do GitHub. Verifique o repositório.")
-elif df_pagamentos is None:
-    st.error("Base de pagamentos não encontrada no GitHub. Um administrador precisa fazer o upload.")
+if executar_analise:
+    if campanha_selecionada is None:
+        st.warning("Selecione uma campanha antes de executar a análise.")
+    elif df_pagamentos is None:
+        st.warning("Base de pagamentos não disponível. Contate o administrador.")
+    elif not dados_prontos:
+        st.warning("Não foi possível carregar todos os dados da campanha.")
+    else:
+        # todo o bloco de análise existente continua aqui
 
 # ══════════════════════════════════════════════════════════════
 # ANÁLISE PRINCIPAL
