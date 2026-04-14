@@ -939,6 +939,33 @@ if executar_analise:
             with aba5:
                 if not df_pagamentos_campanha.empty:
                     st.subheader("Detalhes dos Pagamentos Atribuídos à Campanha")
+
                     colunas_possiveis = [
-                        'MATRICULA', 'CIDADE',
+                        'MATRICULA', 'CIDADE', 'DIRETORIA', 'TELEFONE_ENVIO',
+                        'DATA_ENVIO', 'DATA_PAGAMENTO', 'VENCIMENTO',
+                        'VALOR_PAGO', 'DIAS_APOS_ENVIO',
+                        'TIPO_FATURA', 'UTILIZACAO', 'TIPO_PAGAMENTO'
+                    ]
+                    colunas_exibicao = [c for c in colunas_possiveis if c in df_pagamentos_campanha.columns]
+
+                    df_detalhes = df_pagamentos_campanha[colunas_exibicao].drop_duplicates(
+                        subset=['MATRICULA', 'DATA_PAGAMENTO', 'VALOR_PAGO']
+                    )
+
+                    st.dataframe(df_detalhes, use_container_width=True, hide_index=True)
+
+                    csv_output = df_detalhes.to_csv(index=False, sep=';', decimal=',')
+                    st.download_button(
+                        label="Baixar Detalhes dos Pagamentos da Campanha (CSV)",
+                        data=csv_output,
+                        file_name="pagamentos_campanha.csv",
+                        mime="text/csv",
+                    )
+                else:
+                    st.info("Nenhum pagamento encontrado dentro da janela definida para a campanha.")
+
+        else:
+            st.error("Não foi possível processar um ou mais arquivos. Verifique os formatos e as colunas esperadas ou se há matrículas válidas após o cruzamento.")
+    else:
+        st.warning("Por favor, carregue todos os três arquivos para iniciar a análise.")
 
