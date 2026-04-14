@@ -113,7 +113,14 @@ def df_to_parquet_bytes(df):
     return buf.getvalue()
 
 def parquet_bytes_to_df(content_bytes):
-    return pd.read_parquet(io.BytesIO(content_bytes))
+    try:
+        return pd.read_parquet(io.BytesIO(content_bytes))
+    except Exception as e1:
+        try:
+            return pd.read_parquet(io.BytesIO(content_bytes), engine='fastparquet')
+        except Exception as e2:
+            st.error(f"Erro ao ler parquet: {e1} | {e2}")
+            return None
 
 # ══════════════════════════════════════════════════════════════
 # CAMPANHAS
@@ -163,16 +170,30 @@ def save_campanha(nome, df_envios, df_clientes):
     return campanha_id, None
 
 def load_campanha_envios(campanha_id):
-    content, _ = get_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet")
-    if content:
-        return parquet_bytes_to_df(content)
-    return None
+    try:
+        path = f"data/campanhas/{campanha_id}_envios.parquet"
+        content, sha = get_file_from_github(path)
+        if content is None:
+            st.error(f"Arquivo não encontrado: {path}")
+            return None
+        df = parquet_bytes_to_df(content)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar envios: {e}")
+        return None
 
 def load_campanha_clientes(campanha_id):
-    content, _ = get_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet")
-    if content:
-        return parquet_bytes_to_df(content)
-    return None
+    try:
+        path = f"data/campanhas/{campanha_id}_clientes.parquet"
+        content, sha = get_file_from_github(path)
+        if content is None:
+            st.error(f"Arquivo não encontrado: {path}")
+            return None
+        df = parquet_bytes_to_df(content)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar clientes: {e}")
+        return None
 
 def delete_campanha(campanha_id, nome):
     df_meta = load_campanhas_meta()
@@ -187,10 +208,15 @@ def delete_campanha(campanha_id, nome):
 
 
 def load_pagamentos_github():
-    content, _ = get_file_from_github(PAG_PATH)
-    if content:
-        return parquet_bytes_to_df(content)
-    return None
+    try:
+        content, sha = get_file_from_github(PAG_PATH)
+        if content is None:
+            return None
+        df = parquet_bytes_to_df(content)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar pagamentos: {e}")
+        return None
 
 def update_pagamentos_github(df_novo):
     df_existente = load_pagamentos_github()
