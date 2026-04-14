@@ -622,22 +622,20 @@ if campanha_selecionada is not None:
     else:
         st.sidebar.error("Erro ao carregar clientes da campanha.")
 
-# Validação e feedback
+df_pagamentos = load_pagamentos_github()
+if df_pagamentos is not None:
+    st.sidebar.success(f"✅ Pagamentos disponíveis ({len(df_pagamentos):,} registros)")
+else:
+    st.sidebar.warning("⚠️ Base de pagamentos não encontrada.")
+
 dados_prontos = (
     df_envios     is not None and
     df_clientes   is not None and
     df_pagamentos is not None
 )
 
-if executar_analise:
-    if campanha_selecionada is None:
-        st.warning("Selecione uma campanha antes de executar a análise.")
-    elif df_pagamentos is None:
-        st.warning("Base de pagamentos não disponível. Contate o administrador.")
-    elif not dados_prontos:
-        st.warning("Não foi possível carregar todos os dados da campanha.")
-    else:
-        # todo o bloco de análise existente continua aqui
+if executar_analise and dados_prontos:
+    pass  # aqui começa o bloco de análise existente
 
 # ══════════════════════════════════════════════════════════════
 # ANÁLISE PRINCIPAL
