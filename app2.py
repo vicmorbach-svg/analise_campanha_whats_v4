@@ -491,50 +491,108 @@ st.sidebar.markdown("---")
 # ══════════════════════════════════════════════════════════════
 
 # ── Sidebar: seleção de campanha ─────────────────────────────
+# ── Sidebar: seleção de campanha ─────────────────────────────
 st.sidebar.header("📋 Campanhas")
 
 df_meta = load_campanhas_meta()
+campanhas_disponiveis = df_meta['nome'].tolist() if not df_meta.empty else []
 
-# Adiciona coluna de Mês/Ano para agrupamento
-if not df_meta.empty:
-    df_meta['MES_ANO_CRIACAO'] = df_meta['criado_em'].dt.strftime('%Y-%m')
-    meses_disponiveis = sorted(df_meta['MES_ANO_CRIACAO'].unique(), reverse=True)
-else:
-    meses_disponiveis = []
-
-mes_selecionado = st.sidebar.selectbox(
-    "Selecionar Mês/Ano das Campanhas",
-    options=["(Todos os meses)"] + meses_disponiveis,
-    key="mes_campanha_selector"
-)
-
-campanhas_do_mes = pd.DataFrame()
-if mes_selecionado == "(Todos os meses)":
-    campanhas_do_mes = df_meta.copy()
-else:
-    campanhas_do_mes = df_meta[df_meta['MES_ANO_CRIACAO'] == mes_selecionado].copy()
-
-campanhas_disponiveis_para_selecao = campanhas_do_mes['nome'].tolist() if not campanhas_do_mes.empty else []
-
+# Permite selecionar múltiplas campanhas
 campanhas_selecionadas_nomes = st.sidebar.multiselect(
-    "Selecionar Campanhas (múltipla escolha)",
-    options=campanhas_disponiveis_para_selecao,
-    default=campanhas_disponiveis_para_selecao, # Seleciona todas por padrão
-    key="multi_campanha_selector"
+    "Selecionar uma ou mais campanhas",
+    options=campanhas_disponiveis,
+    default=[]
 )
 
-# Filtra o df_meta para obter os IDs das campanhas selecionadas
-campanhas_selecionadas_meta = df_meta[df_meta['nome'].isin(campanhas_selecionadas_nomes)]
+campanhas_selecionadas_ids = []
+if campanhas_selecionadas_nomes and not df_meta.empty:
+    campanhas_selecionadas_ids = df_meta[
+        df_meta['nome'].isin(campanhas_selecionadas_nomes)
+    ]['id'].tolist()
+
+    # Exibe detalhes das campanhas selecionadas
+    for nome_campanha in campanhas_selecionadas_nomes:
+        campanha_info = df_meta[df_meta['nome'] == nome_campanha].iloc[0]
+        criado_em = pd.to_datetime(campanha_info['criado_em']).strftime('%d/%m/%Y')
+        st.sidebar.caption(
+            f"**{nome_campanha}**  \n"
+            f"📅 Criada em: {criado_em}  \n"
+            f"📤 Envios: {int(campanha_info['total_envios']):,}  \n"
+            f"👥 Clientes: {int(campanha_info['total_clientes']):,}"
+        )
+        if is_admin():
+            if st.sidebar.button(f"🗑️ Excluir '{nome_campanha}'", key=f"del_{campanha_info['id']}"):
+                delete_campanha(campanha_info['id'], nome_campanha)
+                st.sidebar.success(f"Campanha '{nome_campanha}' excluída.")
+                st.rerun()
+    st.sidebar.markdown("---")
 
 st.sidebar.markdown("---")
 
+# ── Sidebar: configurações da análise ────────────────────────
+st.sidebar.header("⚙️ Configurações")
+janela_dias      = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7)
+executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True)
+
+# ── Sidebar: área administrativa (somente admin) ──────────────
+if is_admin():
+    st.sidebar.markdown("---")
+    st.sidebar.header("🔧 Administração")
+
+    with st.sidebar.expander("➕ Nova Campanha"):
+        nome_nova               = st.text_input("Nome da campanha")
+        uploaded_envios_admin   = st.file_uploader("Base de Envios (.xlsx)",   type=["xlsx"], key="up_env")
+        uploaded_clientes_admin = st.file_uploader("Base de Clientes (.xlsx)", type=["xlsx"], key="up_cli")
+        if st.button("💾 Salvar campanha"):
+            if not nome_nova.strip():
+                st.error("Informe um nome para a campanha.")
+            elif uploaded_envios_admin is None:
+                st.error("Faça upload da base de envios.")
+            elif uploaded_clientes_admin is None:
+                st.error("Faça upload da base de clientes.")
+            else:
+                df_env_tmp = load_and_process_envios(uploaded_envios_admin)
+                df_cli_tmp = load_and_process_clientes(uploaded_clientes_admin)
+                if df_env_tmp is not None and df_cli_tmp is not None:
+                    with st.spinner("Salvando no GitHub..."):
+                        cid, erro = save_campanha(nome_nova.strip(), df_env_tmp, df_cli_tmp)
+                    if erro:
+                        st.error(erro)
+                    else:
+                        st.success(f"Campanha '{nome_nova}' salva! ID: `{cid}`")
+                        st.rerun()
+
+    with st.sidebar.expander("💰 Base de Pagamentos"):
+        pag_gh = load_pagamentos_github()
+        if pag_gh is not None:
+            st.caption(f"✅ Base atual: {len(pag_gh):,} registros")
+        else:
+            st.caption("⚠️ Nenhuma base salva ainda.")
+        uploaded_pag = st.file_uploader(
+            "Enviar/Atualizar (.csv, .xlsx, .parquet)",
+            type=["csv", "xlsx", "parquet"],
+            key="up_pag"
+        )
+        if st.button("⬆️ Enviar para o GitHub"):
+            if uploaded_pag is None:
+                st.error("Selecione um arquivo de pagamentos.")
+            else:
+                df_pag_tmp = load_and_process_pagamentos(uploaded_pag)
+                if df_pag_tmp is not None:
+                    with st.spinner("Atualizando..."):
+                        ok, total, novos = update_pagamentos_github(df_pag_tmp)
+                    if ok:
+                        st.success(f"Atualizado! Total: {total:,} | Novos: {novos:,}")
+                    else:
+                        st.error("Erro ao salvar no GitHub.")
+
 # ══════════════════════════════════════════════════════════════
-# RESOLUÇÃO DOS DADOS (AGORA AGREGADOS)
+# RESOLUÇÃO DOS DADOS PARA ANÁLISE ACUMULADA
 # ══════════════════════════════════════════════════════════════
 
-df_envios_agregado     = None
-df_clientes_agregado   = None
-df_pagamentos          = None # Pagamentos continuam sendo carregados uma vez
+df_envios_agregado   = pd.DataFrame() # Inicializa como DataFrame vazio
+df_clientes_agregado = pd.DataFrame() # Inicializa como DataFrame vazio
+df_pagamentos        = None
 
 # Carrega pagamentos do GitHub automaticamente sempre
 df_pagamentos = load_pagamentos_github()
@@ -547,18 +605,17 @@ else:
         st.sidebar.warning("⚠️ Base de pagamentos indisponível. Contate o administrador.")
 
 # Carrega e agrega dados das campanhas selecionadas
-if not campanhas_selecionadas_meta.empty:
+if campanhas_selecionadas_ids:
     lista_df_envios   = []
     lista_df_clientes = []
     with st.spinner("Carregando dados das campanhas selecionadas..."):
-        for index, row in campanhas_selecionadas_meta.iterrows():
-            campanha_id = row['id']
+        for campanha_id in campanhas_selecionadas_ids:
             df_env_temp = load_campanha_envios(campanha_id)
-            df_cli_temp = load_campanha_clientes(campanha_id)
-
             if df_env_temp is not None:
                 df_env_temp['CAMPANHA_ID'] = campanha_id # Adiciona ID da campanha para rastreamento
                 lista_df_envios.append(df_env_temp)
+
+            df_cli_temp = load_campanha_clientes(campanha_id)
             if df_cli_temp is not None:
                 df_cli_temp['CAMPANHA_ID'] = campanha_id # Adiciona ID da campanha para rastreamento
                 lista_df_clientes.append(df_cli_temp)
@@ -578,11 +635,10 @@ else:
     st.sidebar.info("Nenhuma campanha selecionada para análise.")
 
 dados_prontos = (
-    df_envios_agregado   is not None and
-    df_clientes_agregado is not None and
-    df_pagamentos        is not None and
     not df_envios_agregado.empty and
-    not df_clientes_agregado.empty
+    not df_clientes_agregado.empty and
+    df_pagamentos is not None and
+    not df_pagamentos.empty
 )
 
 # ── Sidebar: configurações da análise ────────────────────────
