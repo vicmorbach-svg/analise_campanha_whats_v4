@@ -18,6 +18,10 @@ import uuid
 # branch = "main"
 # ══════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════
+# GITHUB
+# ══════════════════════════════════════════════════════════════
+
 def get_github_config():
     try:
         token  = st.secrets["github"]["token"]
@@ -79,10 +83,6 @@ def df_to_parquet_bytes(df):
 def parquet_bytes_to_df(content_bytes):
     return pd.read_parquet(io.BytesIO(content_bytes))
 
-# ══════════════════════════════════════════════════════════════
-# FUNÇÕES DE CAMPANHAS
-# ══════════════════════════════════════════════════════════════
-
 META_PATH = "data/campanhas_meta.parquet"
 PAG_PATH  = "data/pagamentos.parquet"
 
@@ -94,7 +94,6 @@ def load_campanhas_meta():
 
 def save_campanha(nome, df_envios, df_clientes):
     campanha_id = str(uuid.uuid4())[:8]
-
     ok_envios = save_file_to_github(
         f"data/campanhas/{campanha_id}_envios.parquet",
         df_to_parquet_bytes(df_envios),
@@ -102,7 +101,6 @@ def save_campanha(nome, df_envios, df_clientes):
     )
     if not ok_envios:
         return None, "Erro ao salvar envios no GitHub."
-
     ok_clientes = save_file_to_github(
         f"data/campanhas/{campanha_id}_clientes.parquet",
         df_to_parquet_bytes(df_clientes),
@@ -110,7 +108,6 @@ def save_campanha(nome, df_envios, df_clientes):
     )
     if not ok_clientes:
         return None, "Envios salvos, mas erro ao salvar clientes no GitHub."
-
     df_meta = load_campanhas_meta()
     nova = pd.DataFrame([{
         'id':             campanha_id,
@@ -123,7 +120,6 @@ def save_campanha(nome, df_envios, df_clientes):
     ok_meta = save_file_to_github(META_PATH, df_to_parquet_bytes(df_meta), f"Meta: campanha {nome} criada")
     if not ok_meta:
         return None, "Arquivos salvos, mas erro ao salvar metadados."
-
     return campanha_id, None
 
 def load_campanha_envios(campanha_id):
@@ -145,10 +141,6 @@ def delete_campanha(campanha_id, nome):
     delete_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet",   f"Campanha {nome}: envios removidos")
     delete_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet", f"Campanha {nome}: clientes removidos")
 
-# ══════════════════════════════════════════════════════════════
-# FUNÇÕES DE PAGAMENTOS
-# ══════════════════════════════════════════════════════════════
-
 def load_pagamentos_github():
     content, _ = get_file_from_github(PAG_PATH)
     if content:
@@ -166,7 +158,7 @@ def update_pagamentos_github(df_novo):
     else:
         df_combined = df_novo.copy()
     total_antes = len(df_existente) if df_existente is not None else 0
-    novos = len(df_combined) - total_antes
+    novos       = len(df_combined) - total_antes
     ok = save_file_to_github(PAG_PATH, df_to_parquet_bytes(df_combined), "Pagamentos: atualização")
     return ok, len(df_combined), novos
 
@@ -390,15 +382,17 @@ def add_bar_labels(fig, formato='valor'):
 # INTERFACE — SIDEBAR
 # ══════════════════════════════════════════════════════════════
 
+# --- Interface Streamlit ---
+
 token, repo, branch = get_github_config()
 github_ok = token is not None
 
 if github_ok:
     st.sidebar.success(f"✅ GitHub: `{repo}`")
 else:
-    st.sidebar.warning("⚠️ GitHub não configurado. Configure em `.streamlit/secrets.toml`.")
+    st.sidebar.warning("⚠️ GitHub não configurado.")
 
-# ── Gestão de Campanhas ───────────────────────────────────────
+# ── Campanhas salvas ──────────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.header("📋 Campanhas")
 
@@ -423,67 +417,15 @@ if campanha_selecionada_nome != "(nenhuma)" and not df_meta.empty:
         st.sidebar.success(f"Campanha '{campanha_selecionada_nome}' excluída.")
         st.rerun()
 
-# ── Nova Campanha ─────────────────────────────────────────────
-if github_ok:
-    with st.sidebar.expander("➕ Salvar nova campanha"):
-        nome_nova_campanha = st.text_input("Nome da campanha")
-        st.caption("Faça o upload dos arquivos abaixo antes de salvar.")
-        if st.button("💾 Salvar campanha"):
-            if not nome_nova_campanha.strip():
-                st.error("Informe um nome para a campanha.")
-            elif df_envios is None:
-                st.error("Faça o upload da base de envios primeiro.")
-            elif df_clientes is None:
-                st.error("Faça o upload da base de clientes primeiro.")
-            else:
-                with st.spinner("Salvando campanha no GitHub..."):
-                    cid, erro = save_campanha(nome_nova_campanha.strip(), df_envios, df_clientes)
-                if erro:
-                    st.error(erro)
-                else:
-                    st.success(f"Campanha '{nome_nova_campanha}' salva com ID `{cid}`!")
-                    st.rerun()
-
-# ── Atualizar Pagamentos no GitHub ───────────────────────────
-if github_ok:
-    with st.sidebar.expander("💰 Atualizar base de pagamentos"):
-        st.caption("Envia os pagamentos processados para o repositório, sem duplicar registros existentes.")
-        if st.button("⬆️ Enviar pagamentos para o GitHub"):
-            if df_pagamentos is None:
-                st.error("Faça o upload da base de pagamentos primeiro.")
-            else:
-                with st.spinner("Atualizando pagamentos no GitHub..."):
-                    ok, total, novos = update_pagamentos_github(df_pagamentos)
-                if ok:
-                    st.success(f"Base atualizada! Total: {total:,} registros | Novos: {novos:,}")
-                else:
-                    st.error("Erro ao salvar pagamentos no GitHub.")
-
-# ── Carregar do GitHub ────────────────────────────────────────
-if github_ok:
-    with st.sidebar.expander("☁️ Usar pagamentos do GitHub"):
-        pag_github = load_pagamentos_github()
-        if pag_github is not None:
-            st.caption(f"Base disponível: {len(pag_github):,} registros")
-            if st.button("📥 Carregar pagamentos do GitHub"):
-                st.session_state['df_pagamentos_github'] = pag_github
-                st.success("Pagamentos carregados do GitHub!")
-        else:
-            st.caption("Nenhuma base de pagamentos salva no GitHub.")
-
-# ── Upload de arquivos ────────────────────────────────────────
+# ── Uploads ───────────────────────────────────────────────────
 st.sidebar.markdown("---")
-st.sidebar.header("📁 Upload de Arquivos")
+st.sidebar.header("Upload de Arquivos")
 uploaded_envios     = st.sidebar.file_uploader("1. Base de Envios (.xlsx)", type=["xlsx"])
 uploaded_pagamentos = st.sidebar.file_uploader("2. Base de Pagamentos (.csv, .xlsx ou .parquet)", type=["csv", "xlsx", "parquet"])
 uploaded_clientes   = st.sidebar.file_uploader("3. Base de Clientes (.xlsx)", type=["xlsx"])
 
-st.sidebar.header("⚙️ Configurações da Análise")
-janela_dias = st.sidebar.slider(
-    "Janela de dias para considerar o pagamento após o envio:",
-    0, 30, 7
-)
-
+st.sidebar.header("Configurações da Análise")
+janela_dias      = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7)
 executar_analise = st.sidebar.button("▶️ Executar Análise")
 
 # ── Resolver fontes de dados ──────────────────────────────────
@@ -491,28 +433,69 @@ df_envios     = None
 df_pagamentos = None
 df_clientes   = None
 
-# Campanha selecionada carrega envios e clientes do GitHub
+# Carrega do GitHub se campanha selecionada
 if campanha_selecionada is not None:
-    with st.spinner("Carregando dados da campanha do GitHub..."):
+    with st.spinner("Carregando dados da campanha..."):
         df_envios   = load_campanha_envios(campanha_selecionada['id'])
         df_clientes = load_campanha_clientes(campanha_selecionada['id'])
     if df_envios is not None:
-        st.sidebar.success(f"✅ Envios carregados do GitHub ({len(df_envios):,} registros)")
+        st.sidebar.success(f"✅ Envios do GitHub ({len(df_envios):,} registros)")
     if df_clientes is not None:
-        st.sidebar.success(f"✅ Clientes carregados do GitHub ({len(df_clientes):,} registros)")
+        st.sidebar.success(f"✅ Clientes do GitHub ({len(df_clientes):,} registros)")
 
-# Upload local sobrescreve o GitHub se fornecido
+# Upload local sobrescreve GitHub
 if uploaded_envios:
     df_envios = load_and_process_envios(uploaded_envios)
 if uploaded_clientes:
     df_clientes = load_and_process_clientes(uploaded_clientes)
-
-# Pagamentos: prioridade para upload local, depois session_state, depois GitHub
 if uploaded_pagamentos:
     df_pagamentos = load_and_process_pagamentos(uploaded_pagamentos)
 elif 'df_pagamentos_github' in st.session_state:
     df_pagamentos = st.session_state['df_pagamentos_github']
     st.sidebar.info(f"Usando pagamentos do GitHub ({len(df_pagamentos):,} registros)")
+
+# ── Salvar nova campanha (só após df_envios e df_clientes estarem definidos) ──
+if github_ok:
+    with st.sidebar.expander("➕ Salvar nova campanha"):
+        nome_nova = st.text_input("Nome da campanha")
+        if st.button("💾 Salvar campanha"):
+            if not nome_nova.strip():
+                st.error("Informe um nome para a campanha.")
+            elif df_envios is None:
+                st.error("Carregue a base de envios primeiro.")
+            elif df_clientes is None:
+                st.error("Carregue a base de clientes primeiro.")
+            else:
+                with st.spinner("Salvando no GitHub..."):
+                    cid, erro = save_campanha(nome_nova.strip(), df_envios, df_clientes)
+                if erro:
+                    st.error(erro)
+                else:
+                    st.success(f"Campanha '{nome_nova}' salva! ID: `{cid}`")
+                    st.rerun()
+
+    with st.sidebar.expander("💰 Enviar pagamentos para o GitHub"):
+        if st.button("⬆️ Enviar"):
+            if df_pagamentos is None:
+                st.error("Carregue a base de pagamentos primeiro.")
+            else:
+                with st.spinner("Atualizando..."):
+                    ok, total, novos = update_pagamentos_github(df_pagamentos)
+                if ok:
+                    st.success(f"Atualizado! Total: {total:,} | Novos: {novos:,}")
+                else:
+                    st.error("Erro ao salvar no GitHub.")
+
+    with st.sidebar.expander("☁️ Usar pagamentos do GitHub"):
+        pag_gh = load_pagamentos_github()
+        if pag_gh is not None:
+            st.caption(f"Disponível: {len(pag_gh):,} registros")
+            if st.button("📥 Carregar"):
+                st.session_state['df_pagamentos_github'] = pag_gh
+                st.success("Carregado!")
+                st.rerun()
+        else:
+            st.caption("Nenhuma base salva no GitHub.")
 
 if st.sidebar.checkbox("Mostrar pré-visualização dos dados processados"):
     if df_envios is not None:
