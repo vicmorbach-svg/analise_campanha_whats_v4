@@ -4,4 +4,4 @@ plotly
 requests
 openpyxl
 pyarrow
-
+fastparquet
