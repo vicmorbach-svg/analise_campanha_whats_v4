@@ -1021,20 +1021,20 @@ if executar_analise:
     # MENSAGENS QUANDO ANÁLISE NÃO É EXECUTADA
     # ══════════════════════════════════════════════════════════════
     
-    elif executar_analise and not dados_prontos:
-        if campanha_selecionada is None:
-            st.warning("Selecione uma campanha antes de executar a análise.")
-        elif df_pagamentos is None:
-            st.warning("Base de pagamentos não disponível. Um administrador precisa fazer o upload.")
-        elif df_envios is None:
-            st.warning("Não foi possível carregar os envios da campanha selecionada.")
-        elif df_clientes is None:
-            st.warning("Não foi possível carregar os clientes da campanha selecionada.")
+elif executar_analise and not dados_prontos:
+    if campanha_selecionada is None:
+        st.warning("Selecione uma campanha antes de executar a análise.")
+    elif df_pagamentos is None:
+        st.warning("Base de pagamentos não disponível. Um administrador precisa fazer o upload.")
+    elif df_envios is None:
+        st.warning("Não foi possível carregar os envios da campanha selecionada.")
+    elif df_clientes is None:
+        st.warning("Não foi possível carregar os clientes da campanha selecionada.")
     
-    elif not executar_analise:
-        if campanha_selecionada is None:
-            st.info("👈 Selecione uma campanha na barra lateral para começar.")
-        else:
-            st.info("👈 Clique em **Executar Análise** na barra lateral para gerar os resultados.")
+elif not executar_analise:
+    if campanha_selecionada is None:
+        st.info("👈 Selecione uma campanha na barra lateral para começar.")
+    else:
+        st.info("👈 Clique em **Executar Análise** na barra lateral para gerar os resultados.")
 
 
