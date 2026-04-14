@@ -15,7 +15,7 @@ import uuid
 def get_users():
     users = {}
     try:
-        secrets = st.secrets["users"]
+        secrets  = st.secrets["users"]
         prefixes = set()
         for key in secrets:
             if key.endswith("_user"):
@@ -51,7 +51,7 @@ def is_admin():
     return st.session_state.get("role") == "admin"
 
 # ══════════════════════════════════════════════════════════════
-# GITHUB
+# GITHUB — com suporte a arquivos grandes
 # ══════════════════════════════════════════════════════════════
 
 def get_github_config():
@@ -67,24 +67,48 @@ def get_github_headers():
     token, _, _ = get_github_config()
     return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
-def get_file_from_github(path):
+def get_file_sha(path):
+    """Retorna apenas o SHA de um arquivo para operações de update."""
     token, repo, branch = get_github_config()
     if not token:
-        return None, None
+        return None
     url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
     r   = requests.get(url, headers=get_github_headers())
     if r.status_code == 200:
-        data    = r.json()
-        content = base64.b64decode(data["content"])
-        return content, data["sha"]
+        data = r.json()
+        # arquivo pequeno
+        if isinstance(data, dict):
+            return data.get("sha")
+    return None
+
+def get_file_from_github(path):
+    """
+    Lê arquivo do GitHub via Raw URL (sem limite de tamanho).
+    Retorna (bytes, sha) ou (None, None).
+    """
+    token, repo, branch = get_github_config()
+    if not token:
+        return None, None
+
+    # Leitura via raw URL — sem limite de 1MB
+    raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
+    r = requests.get(raw_url, headers={"Authorization": f"token {token}"})
+    if r.status_code == 200 and len(r.content) > 0:
+        sha = get_file_sha(path)
+        return r.content, sha
     return None, None
 
 def save_file_to_github(path, content_bytes, message):
+    """
+    Salva arquivo no GitHub.
+    Arquivos <= 50MB usam a Contents API com base64.
+    """
     token, repo, branch = get_github_config()
     if not token:
         return False
+
+    sha     = get_file_sha(path)
     url     = f"https://api.github.com/repos/{repo}/contents/{path}"
-    _, sha  = get_file_from_github(path)
     payload = {
         "message": message,
         "content": base64.b64encode(content_bytes).decode("utf-8"),
@@ -92,6 +116,7 @@ def save_file_to_github(path, content_bytes, message):
     }
     if sha:
         payload["sha"] = sha
+
     r = requests.put(url, headers=get_github_headers(), data=json.dumps(payload))
     return r.status_code in [200, 201]
 
@@ -99,27 +124,35 @@ def delete_file_from_github(path, message):
     token, repo, branch = get_github_config()
     if not token:
         return False
-    url    = f"https://api.github.com/repos/{repo}/contents/{path}"
-    _, sha = get_file_from_github(path)
+    sha = get_file_sha(path)
     if not sha:
         return True
+    url     = f"https://api.github.com/repos/{repo}/contents/{path}"
     payload = {"message": message, "sha": sha, "branch": branch}
     r = requests.delete(url, headers=get_github_headers(), data=json.dumps(payload))
     return r.status_code == 200
 
 def df_to_parquet_bytes(df):
     buf = io.BytesIO()
-    df.to_parquet(buf, index=False)
+    df.to_parquet(buf, index=False, engine='pyarrow')
+    buf.seek(0)
     return buf.getvalue()
 
 def parquet_bytes_to_df(content_bytes):
+    if content_bytes is None or len(content_bytes) == 0:
+        st.error("Conteúdo do arquivo está vazio (0 bytes).")
+        return None
     try:
-        return pd.read_parquet(io.BytesIO(content_bytes))
+        buf = io.BytesIO(content_bytes)
+        buf.seek(0)
+        return pd.read_parquet(buf, engine='pyarrow')
     except Exception as e1:
         try:
-            return pd.read_parquet(io.BytesIO(content_bytes), engine='fastparquet')
+            buf = io.BytesIO(content_bytes)
+            buf.seek(0)
+            return pd.read_parquet(buf, engine='fastparquet')
         except Exception as e2:
-            st.error(f"Erro ao ler parquet: {e1} | {e2}")
+            st.error(f"Erro ao ler parquet — pyarrow: {e1} | fastparquet: {e2}")
             return None
 
 # ══════════════════════════════════════════════════════════════
@@ -132,7 +165,9 @@ PAG_PATH  = "data/pagamentos.parquet"
 def load_campanhas_meta():
     content, _ = get_file_from_github(META_PATH)
     if content:
-        return parquet_bytes_to_df(content)
+        df = parquet_bytes_to_df(content)
+        if df is not None:
+            return df
     return pd.DataFrame(columns=['id', 'nome', 'criado_em', 'total_envios', 'total_clientes'])
 
 def save_campanha(nome, df_envios, df_clientes):
@@ -170,30 +205,20 @@ def save_campanha(nome, df_envios, df_clientes):
     return campanha_id, None
 
 def load_campanha_envios(campanha_id):
-    try:
-        path = f"data/campanhas/{campanha_id}_envios.parquet"
-        content, sha = get_file_from_github(path)
-        if content is None:
-            st.error(f"Arquivo não encontrado: {path}")
-            return None
-        df = parquet_bytes_to_df(content)
-        return df
-    except Exception as e:
-        st.error(f"Erro ao carregar envios: {e}")
+    path = f"data/campanhas/{campanha_id}_envios.parquet"
+    content, _ = get_file_from_github(path)
+    if content is None:
+        st.error(f"Arquivo não encontrado: {path}")
         return None
+    return parquet_bytes_to_df(content)
 
 def load_campanha_clientes(campanha_id):
-    try:
-        path = f"data/campanhas/{campanha_id}_clientes.parquet"
-        content, sha = get_file_from_github(path)
-        if content is None:
-            st.error(f"Arquivo não encontrado: {path}")
-            return None
-        df = parquet_bytes_to_df(content)
-        return df
-    except Exception as e:
-        st.error(f"Erro ao carregar clientes: {e}")
+    path = f"data/campanhas/{campanha_id}_clientes.parquet"
+    content, _ = get_file_from_github(path)
+    if content is None:
+        st.error(f"Arquivo não encontrado: {path}")
         return None
+    return parquet_bytes_to_df(content)
 
 def delete_campanha(campanha_id, nome):
     df_meta = load_campanhas_meta()
@@ -206,17 +231,11 @@ def delete_campanha(campanha_id, nome):
 # PAGAMENTOS
 # ══════════════════════════════════════════════════════════════
 
-
 def load_pagamentos_github():
-    try:
-        content, sha = get_file_from_github(PAG_PATH)
-        if content is None:
-            return None
-        df = parquet_bytes_to_df(content)
-        return df
-    except Exception as e:
-        st.error(f"Erro ao carregar pagamentos: {e}")
+    content, _ = get_file_from_github(PAG_PATH)
+    if content is None or len(content) == 0:
         return None
+    return parquet_bytes_to_df(content)
 
 def update_pagamentos_github(df_novo):
     df_existente = load_pagamentos_github()
@@ -243,7 +262,7 @@ def load_and_process_envios(uploaded_file):
         df = pd.read_excel(uploaded_file)
         required_cols = ['To', 'Send At']
         if not all(col in df.columns for col in required_cols):
-            st.error(f"Arquivo de Envios: colunas 'To' e 'Send At' não encontradas.")
+            st.error("Arquivo de Envios: colunas 'To' e 'Send At' não encontradas.")
             return None
         df_envios = df[['To', 'Send At']].copy()
         df_envios.rename(columns={'To': 'TELEFONE_ENVIO', 'Send At': 'DATA_ENVIO'}, inplace=True)
@@ -307,7 +326,7 @@ def load_and_process_pagamentos(uploaded_file):
     try:
         df = None
         if uploaded_file.name.endswith('.parquet'):
-            df_pag = pd.read_parquet(uploaded_file)
+            df_pag = pd.read_parquet(uploaded_file, engine='pyarrow')
             if 'MATRICULA_PAGAMENTO' in df_pag.columns:
                 df_pag['MATRICULA_PAGAMENTO'] = (
                     df_pag['MATRICULA_PAGAMENTO']
@@ -455,7 +474,7 @@ if not st.session_state.get("logged_in"):
 
 st.title("📊 Análise de eficiência de campanha de cobrança via Whatsapp")
 
-# ── Sidebar: cabeçalho do usuário ────────────────────────────
+# ── Cabeçalho da sidebar ─────────────────────────────────────
 st.sidebar.markdown(
     f"👤 **{st.session_state['username']}** "
     f"({'Admin' if is_admin() else 'Usuário'})"
@@ -468,70 +487,11 @@ if st.sidebar.button("Sair"):
 st.sidebar.markdown("---")
 
 # ══════════════════════════════════════════════════════════════
-# DIAGNÓSTICO GITHUB — remova após resolver o problema
+# SIDEBAR — SELEÇÃO DE CAMPANHA (todos os perfis)
 # ══════════════════════════════════════════════════════════════
 
-if is_admin():
-    with st.sidebar.expander("🔍 Diagnóstico GitHub"):
-        token, repo, branch = get_github_config()
-        st.code(f"repo:   {repo}\nbranch: {branch}")
-
-        if st.button("Listar arquivos em /data"):
-            url = f"https://api.github.com/repos/{repo}/contents/data?ref={branch}"
-            r   = requests.get(url, headers=get_github_headers())
-            if r.status_code == 200:
-                arquivos = [item['path'] for item in r.json()]
-                st.success(f"{len(arquivos)} item(s) encontrado(s):")
-                for a in arquivos:
-                    st.code(a)
-            else:
-                st.error(f"Erro {r.status_code}: {r.text}")
-
-        if st.button("Listar arquivos em /data/campanhas"):
-            url = f"https://api.github.com/repos/{repo}/contents/data/campanhas?ref={branch}"
-            r   = requests.get(url, headers=get_github_headers())
-            if r.status_code == 200:
-                arquivos = [item['path'] for item in r.json()]
-                st.success(f"{len(arquivos)} item(s) encontrado(s):")
-                for a in arquivos:
-                    st.code(a)
-            else:
-                st.error(f"Erro {r.status_code}: {r.text}")
-
-        if st.button("Verificar meta"):
-            content, sha = get_file_from_github(META_PATH)
-            if content:
-                df_test = parquet_bytes_to_df(content)
-                st.success(f"Meta encontrada! {len(df_test)} campanha(s):")
-                st.dataframe(df_test)
-            else:
-                st.error(f"Meta não encontrada em: {META_PATH}")
-
-        if st.button("Verificar pagamentos"):
-            content, sha = get_file_from_github(PAG_PATH)
-            if content:
-                df_test = parquet_bytes_to_df(content)
-                st.success(f"Pagamentos encontrados! {len(df_test):,} registros")
-                st.dataframe(df_test.head(3))
-            else:
-                st.error(f"Pagamentos não encontrados em: {PAG_PATH}")
-
-        if st.button("Testar gravação"):
-            df_teste = pd.DataFrame([{'teste': 'ok', 'ts': str(pd.Timestamp.now())}])
-            ok = save_file_to_github(
-                "data/teste_gravacao.parquet",
-                df_to_parquet_bytes(df_teste),
-                "teste de gravação"
-            )
-            if ok:
-                st.success("Gravação funcionando!")
-            else:
-                st.error("Falha na gravação. Verifique o token e permissões.")
-
-# ── Sidebar: seleção de campanha ─────────────────────────────
-st.sidebar.header("📋 Campanha")
-
-df_meta               = load_campanhas_meta()
+st.sidebar.header("📋 Campanhas")
+df_meta = load_campanhas_meta()
 campanhas_disponiveis = df_meta['nome'].tolist() if not df_meta.empty else []
 
 campanha_selecionada_nome = st.sidebar.selectbox(
@@ -544,9 +504,9 @@ if campanha_selecionada_nome != "(nenhuma)" and not df_meta.empty:
     campanha_selecionada = df_meta[df_meta['nome'] == campanha_selecionada_nome].iloc[0]
     criado_em = pd.to_datetime(campanha_selecionada['criado_em']).strftime('%d/%m/%Y')
     st.sidebar.caption(
-        f"📅 Criada em: {criado_em}  \n"
-        f"📤 Envios: {int(campanha_selecionada['total_envios']):,}  \n"
-        f"👥 Clientes: {int(campanha_selecionada['total_clientes']):,}"
+        f"Envios: {int(campanha_selecionada['total_envios']):,} | "
+        f"Clientes: {int(campanha_selecionada['total_clientes']):,} | "
+        f"Criada: {criado_em}"
     )
     if is_admin():
         if st.sidebar.button("🗑️ Excluir esta campanha"):
@@ -555,21 +515,22 @@ if campanha_selecionada_nome != "(nenhuma)" and not df_meta.empty:
             st.rerun()
 
 st.sidebar.markdown("---")
-
-# ── Sidebar: configurações da análise ────────────────────────
 st.sidebar.header("⚙️ Configurações")
-janela_dias      = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7)
-executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True)
+janela_dias    = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7)
+executar_analise = st.sidebar.button("▶️ Executar Análise")
 
-# ── Sidebar: área administrativa (somente admin) ──────────────
+# ══════════════════════════════════════════════════════════════
+# SIDEBAR — ADMINISTRAÇÃO (somente admin)
+# ══════════════════════════════════════════════════════════════
+
 if is_admin():
     st.sidebar.markdown("---")
     st.sidebar.header("🔧 Administração")
 
     with st.sidebar.expander("➕ Nova Campanha"):
         nome_nova               = st.text_input("Nome da campanha")
-        uploaded_envios_admin   = st.file_uploader("Base de Envios (.xlsx)",   type=["xlsx"], key="up_env")
-        uploaded_clientes_admin = st.file_uploader("Base de Clientes (.xlsx)", type=["xlsx"], key="up_cli")
+        uploaded_envios_admin   = st.file_uploader("Base de Envios (.xlsx)",   type=["xlsx"], key="up_env_admin")
+        uploaded_clientes_admin = st.file_uploader("Base de Clientes (.xlsx)", type=["xlsx"], key="up_cli_admin")
         if st.button("💾 Salvar campanha"):
             if not nome_nova.strip():
                 st.error("Informe um nome para a campanha.")
@@ -590,21 +551,21 @@ if is_admin():
                         st.rerun()
 
     with st.sidebar.expander("💰 Base de Pagamentos"):
-        pag_gh = load_pagamentos_github()
-        if pag_gh is not None:
-            st.caption(f"✅ Base atual: {len(pag_gh):,} registros")
+        pag_atual = load_pagamentos_github()
+        if pag_atual is not None:
+            st.caption(f"✅ Base atual: {len(pag_atual):,} registros")
         else:
             st.caption("⚠️ Nenhuma base salva ainda.")
-        uploaded_pag = st.file_uploader(
-            "Enviar/Atualizar (.csv, .xlsx, .parquet)",
+        uploaded_pag_admin = st.file_uploader(
+            "Enviar/Atualizar pagamentos",
             type=["csv", "xlsx", "parquet"],
-            key="up_pag"
+            key="up_pag_admin"
         )
         if st.button("⬆️ Enviar para o GitHub"):
-            if uploaded_pag is None:
+            if uploaded_pag_admin is None:
                 st.error("Selecione um arquivo de pagamentos.")
             else:
-                df_pag_tmp = load_and_process_pagamentos(uploaded_pag)
+                df_pag_tmp = load_and_process_pagamentos(uploaded_pag_admin)
                 if df_pag_tmp is not None:
                     with st.spinner("Atualizando..."):
                         ok, total, novos = update_pagamentos_github(df_pag_tmp)
@@ -614,45 +575,35 @@ if is_admin():
                         st.error("Erro ao salvar no GitHub.")
 
 # ══════════════════════════════════════════════════════════════
-# RESOLUÇÃO DOS DADOS
-# Campanha e pagamentos vêm sempre do GitHub.
-# Upload local disponível apenas para admin e apenas
-# para substituir pontualmente durante a sessão.
+# CARREGAMENTO DOS DADOS
 # ══════════════════════════════════════════════════════════════
 
 df_envios     = None
 df_clientes   = None
 df_pagamentos = None
 
-# Carrega pagamentos do GitHub automaticamente sempre
-df_pagamentos = load_pagamentos_github()
-if df_pagamentos is not None:
-    st.sidebar.success(f"✅ Pagamentos carregados ({len(df_pagamentos):,} registros)")
-else:
-    if is_admin():
-        st.sidebar.warning("⚠️ Base de pagamentos não encontrada. Faça o upload na seção Administração.")
-    else:
-        st.sidebar.warning("⚠️ Base de pagamentos indisponível. Contate o administrador.")
-
-# Carrega campanha selecionada do GitHub
 if campanha_selecionada is not None:
     with st.spinner("Carregando dados da campanha..."):
         df_envios   = load_campanha_envios(campanha_selecionada['id'])
         df_clientes = load_campanha_clientes(campanha_selecionada['id'])
-    if df_envios is not None:
-        st.sidebar.success(f"✅ Envios carregados ({len(df_envios):,} registros)")
-    else:
-        st.sidebar.error("Erro ao carregar envios da campanha.")
-    if df_clientes is not None:
-        st.sidebar.success(f"✅ Clientes carregados ({len(df_clientes):,} registros)")
-    else:
-        st.sidebar.error("Erro ao carregar clientes da campanha.")
 
-df_pagamentos = load_pagamentos_github()
-if df_pagamentos is not None:
-    st.sidebar.success(f"✅ Pagamentos disponíveis ({len(df_pagamentos):,} registros)")
-else:
-    st.sidebar.warning("⚠️ Base de pagamentos não encontrada.")
+    if df_envios is not None:
+        st.sidebar.success(f"✅ Envios carregados ({len(df_envios):,})")
+    else:
+        st.sidebar.error("Erro ao carregar envios.")
+
+    if df_clientes is not None:
+        st.sidebar.success(f"✅ Clientes carregados ({len(df_clientes):,})")
+    else:
+        st.sidebar.error("Erro ao carregar clientes.")
+
+    with st.spinner("Carregando pagamentos..."):
+        df_pagamentos = load_pagamentos_github()
+
+    if df_pagamentos is not None:
+        st.sidebar.success(f"✅ Pagamentos carregados ({len(df_pagamentos):,})")
+    else:
+        st.sidebar.warning("⚠️ Base de pagamentos não encontrada. Faça o upload na seção Administração.")
 
 dados_prontos = (
     df_envios     is not None and
@@ -660,410 +611,430 @@ dados_prontos = (
     df_pagamentos is not None
 )
 
-if executar_analise and dados_prontos:
-    pass  # aqui começa o bloco de análise existente
-
 # ══════════════════════════════════════════════════════════════
-# ANÁLISE PRINCIPAL
+# ANÁLISE
 # ══════════════════════════════════════════════════════════════
 
-if executar_analise and dados_prontos:
+if executar_analise:
+    if campanha_selecionada is None:
+        st.warning("Selecione uma campanha antes de executar a análise.")
+    elif not dados_prontos:
+        if df_pagamentos is None:
+            st.warning("Base de pagamentos não disponível. Um administrador precisa fazer o upload.")
+        else:
+            st.warning("Não foi possível carregar todos os dados da campanha.")
+    else:
+        # ── Cruzamento de dados (lógica original inalterada) ──
+        df_envios_unicos = df_envios.sort_values('DATA_ENVIO').drop_duplicates(
+            subset='TELEFONE_ENVIO', keep='first'
+        )
 
-    total_clientes_notificados = df_envios['TELEFONE_ENVIO'].nunique()
+        df_merge = pd.merge(
+            df_clientes,
+            df_envios_unicos,
+            left_on='TELEFONE_CLIENTE',
+            right_on='TELEFONE_ENVIO',
+            how='inner'
+        )
 
-    df_telefones_unicos = df_envios[['TELEFONE_ENVIO']].drop_duplicates()
-    df_lookup_divida    = pd.merge(
-        df_telefones_unicos,
-        df_clientes[['TELEFONE_CLIENTE', 'SITUACAO']],
-        left_on='TELEFONE_ENVIO',
-        right_on='TELEFONE_CLIENTE',
-        how='left'
-    )
-    total_divida_notificados = df_lookup_divida['SITUACAO'].sum()
+        if df_merge.empty:
+            st.error("Nenhum cliente encontrado no cruzamento entre Clientes e Envios. Verifique os formatos de telefone.")
+            st.stop()
 
-    df_campanha = pd.merge(
-        df_envios,
-        df_clientes,
-        left_on='TELEFONE_ENVIO',
-        right_on='TELEFONE_CLIENTE',
-        how='left'
-    )
-    df_campanha.dropna(subset=['MATRICULA_CLIENTE'], inplace=True)
-    df_campanha.rename(columns={'MATRICULA_CLIENTE': 'MATRICULA'}, inplace=True)
-    df_campanha.drop(columns=['TELEFONE_CLIENTE'], inplace=True)
-    df_campanha_unique = df_campanha.drop_duplicates(subset=['MATRICULA', 'DATA_ENVIO'])
+        df_merge['MATRICULA_CLIENTE'] = df_merge['MATRICULA_CLIENTE'].astype(str).str.strip()
+        df_pagamentos['MATRICULA_PAGAMENTO'] = df_pagamentos['MATRICULA_PAGAMENTO'].astype(str).str.strip()
 
-    if df_campanha_unique.empty:
-        st.error("Nenhuma matrícula válida encontrada após o cruzamento dos dados.")
-        st.stop()
+        df_cruzado = pd.merge(
+            df_merge,
+            df_pagamentos,
+            left_on='MATRICULA_CLIENTE',
+            right_on='MATRICULA_PAGAMENTO',
+            how='inner'
+        )
 
-    df_resultados = pd.merge(
-        df_campanha_unique,
-        df_pagamentos,
-        left_on='MATRICULA',
-        right_on='MATRICULA_PAGAMENTO',
-        how='left'
-    )
+        if df_cruzado.empty:
+            st.error("Nenhum pagamento encontrado após cruzamento com a base de clientes.")
+            st.stop()
 
-    df_pagamentos_campanha = df_resultados[
-        (df_resultados['DATA_PAGAMENTO'] > df_resultados['DATA_ENVIO']) &
-        (df_resultados['DATA_PAGAMENTO'] <= df_resultados['DATA_ENVIO'] + timedelta(days=janela_dias))
-    ].copy()
-
-    if not df_pagamentos_campanha.empty:
-        df_pagamentos_campanha['DIAS_APOS_ENVIO'] = (
-            df_pagamentos_campanha['DATA_PAGAMENTO'] - df_pagamentos_campanha['DATA_ENVIO']
+        df_cruzado['DIAS_APOS_ENVIO'] = (
+            df_cruzado['DATA_PAGAMENTO'] - df_cruzado['DATA_ENVIO']
         ).dt.days
 
-    clientes_pagaram     = df_pagamentos_campanha['MATRICULA'].nunique()
-    valor_arrecadado     = df_pagamentos_campanha['VALOR_PAGO'].sum() if not df_pagamentos_campanha.empty else 0
-    taxa_cli             = (clientes_pagaram / total_clientes_notificados * 100) if total_clientes_notificados > 0 else 0
-    taxa_val             = (valor_arrecadado / total_divida_notificados * 100) if total_divida_notificados > 0 else 0
+        df_pagamentos_campanha = df_cruzado[
+            (df_cruzado['DIAS_APOS_ENVIO'] >= 0) &
+            (df_cruzado['DIAS_APOS_ENVIO'] <= janela_dias)
+        ].copy()
 
-    # ── KPIs ─────────────────────────────────────────────────
-    st.markdown("---")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Clientes Notificados",    f"{total_clientes_notificados:,}")
-    c2.metric("Clientes que Pagaram",    f"{clientes_pagaram:,}")
-    c3.metric("Taxa de Conversão",       f"{taxa_cli:.1f}%")
-    c4.metric("Valor Arrecadado",        fmt_brl(valor_arrecadado))
-    c5.metric("% da Dívida Recuperada",  f"{taxa_val:.1f}%")
-    st.markdown("---")
+        # Remover duplicidades: mesmo imóvel, mesma data, mesmo valor
+        df_pagamentos_campanha = df_pagamentos_campanha.drop_duplicates(
+            subset=['MATRICULA_CLIENTE', 'DATA_PAGAMENTO', 'VALOR_PAGO'],
+            keep='first'
+        )
 
-    aba1, aba2, aba3, aba4, aba5 = st.tabs([
-        "📈 Visão Geral",
-        "🗺️ Geográfica",
-        "📄 Faturas",
-        "💳 Canal de Pagamento",
-        "🔍 Detalhes"
-    ])
+        df_pagamentos_campanha.rename(columns={'MATRICULA_CLIENTE': 'MATRICULA'}, inplace=True)
 
-    # ── ABA 1 — VISÃO GERAL ───────────────────────────────────
-    with aba1:
-        if not df_pagamentos_campanha.empty:
-            st.subheader("Pagamentos por Dia Após o Envio")
-            pagamentos_por_dia = df_pagamentos_campanha.groupby('DIAS_APOS_ENVIO').agg(
-                Quantidade=('MATRICULA', 'count'),
-                Valor_Pago=('VALOR_PAGO', 'sum')
-            ).reset_index()
+        # ── Métricas gerais ───────────────────────────────────
+        total_enviados      = df_envios['TELEFONE_ENVIO'].nunique()
+        total_clientes_base = len(df_clientes)
+        clientes_pagaram    = df_pagamentos_campanha['MATRICULA'].nunique()
+        valor_total         = df_pagamentos_campanha['VALOR_PAGO'].sum()
+        ticket_medio        = valor_total / clientes_pagaram if clientes_pagaram > 0 else 0
+        taxa_conversao      = (clientes_pagaram / total_enviados * 100) if total_enviados > 0 else 0
 
-            fig_dia_valor = px.bar(
-                pagamentos_por_dia, x='DIAS_APOS_ENVIO', y='Valor_Pago',
-                title='Valor Pago por Dia Após o Envio',
-                labels={'DIAS_APOS_ENVIO': 'Dias Após o Envio', 'Valor_Pago': 'Valor Pago (R$)'},
-                hover_data={'Valor_Pago': ':.2f'}
-            )
-            fig_dia_valor = add_bar_labels(fig_dia_valor, 'valor')
-            fig_dia_valor.update_layout(xaxis_title="Dias Após o Envio", yaxis_title="Valor Pago (R$)")
-            st.plotly_chart(fig_dia_valor, use_container_width=True, key="fig_dia_valor")
+        st.subheader(f"📊 Resultados — {campanha_selecionada_nome}")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Mensagens Enviadas",   f"{total_enviados:,}")
+        col2.metric("Clientes na Base",     f"{total_clientes_base:,}")
+        col3.metric("Clientes que Pagaram", f"{clientes_pagaram:,}")
+        col4.metric("Valor Arrecadado",     fmt_brl(valor_total))
+        col5.metric("Taxa de Conversão",    f"{taxa_conversao:.2f}%")
 
-            fig_dia_qtd = px.bar(
-                pagamentos_por_dia, x='DIAS_APOS_ENVIO', y='Quantidade',
-                title='Quantidade de Pagamentos por Dia Após o Envio',
-                labels={'DIAS_APOS_ENVIO': 'Dias Após o Envio', 'Quantidade': 'Quantidade de Pagamentos'}
-            )
-            fig_dia_qtd = add_bar_labels(fig_dia_qtd, 'qtd')
-            fig_dia_qtd.update_layout(xaxis_title="Dias Após o Envio", yaxis_title="Quantidade de Pagamentos")
-            st.plotly_chart(fig_dia_qtd, use_container_width=True, key="fig_dia_qtd")
+        aba1, aba2, aba3, aba4, aba5 = st.tabs([
+            "📅 Tempo", "🗺️ Geográfica", "🧾 Faturas", "💳 Canal", "🔍 Detalhes"
+        ])
 
-            tab_dia = pagamentos_por_dia.copy()
-            tab_dia.columns = ['Dias Após o Envio', 'Quantidade de Pagamentos', 'Valor Pago']
-            tab_dia['Valor Pago'] = tab_dia['Valor Pago'].apply(fmt_brl)
-            st.dataframe(tab_dia, use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhum pagamento encontrado dentro da janela definida.")
-
-    # ── ABA 2 — GEOGRÁFICA ────────────────────────────────────
-    with aba2:
-        if not df_pagamentos_campanha.empty:
-            tem_cidade    = 'CIDADE'    in df_pagamentos_campanha.columns
-            tem_diretoria = 'DIRETORIA' in df_pagamentos_campanha.columns
-
-            if tem_cidade:
-                st.subheader("Análise por Cidade")
-                cidade_resumo = df_pagamentos_campanha.groupby('CIDADE').agg(
-                    Clientes_que_Pagaram=('MATRICULA', 'nunique'),
-                    Valor_Arrecadado=('VALOR_PAGO', 'sum')
-                ).reset_index().sort_values('Valor_Arrecadado', ascending=False)
-
-                fig_cidade_valor = px.bar(
-                    cidade_resumo, x='CIDADE', y='Valor_Arrecadado',
-                    title='Valor Arrecadado por Cidade',
-                    labels={'CIDADE': 'Cidade', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
-                    hover_data={'Valor_Arrecadado': ':.2f'}
-                )
-                fig_cidade_valor = add_bar_labels(fig_cidade_valor, 'valor')
-                fig_cidade_valor.update_layout(xaxis_title="Cidade", yaxis_title="Valor Arrecadado (R$)")
-                st.plotly_chart(fig_cidade_valor, use_container_width=True, key="fig_cidade_valor")
-
-                fig_cidade_cli = px.bar(
-                    cidade_resumo, x='CIDADE', y='Clientes_que_Pagaram',
-                    title='Clientes que Pagaram por Cidade',
-                    labels={'CIDADE': 'Cidade', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
-                )
-                fig_cidade_cli = add_bar_labels(fig_cidade_cli, 'qtd')
-                fig_cidade_cli.update_layout(xaxis_title="Cidade", yaxis_title="Clientes que Pagaram")
-                st.plotly_chart(fig_cidade_cli, use_container_width=True, key="fig_cidade_cli")
-
-                tab_cidade = cidade_resumo.copy()
-                tab_cidade.columns = ['Cidade', 'Clientes que Pagaram', 'Valor Arrecadado']
-                tab_cidade['Valor Arrecadado'] = tab_cidade['Valor Arrecadado'].apply(fmt_brl)
-                st.dataframe(tab_cidade, use_container_width=True, hide_index=True)
-
-                if 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
-                    st.subheader("Canal de Pagamento por Cidade")
-                    cidade_canal = df_pagamentos_campanha.groupby(['CIDADE', 'TIPO_PAGAMENTO'])['VALOR_PAGO'].sum().reset_index()
-                    fig_cc = px.bar(
-                        cidade_canal, x='CIDADE', y='VALOR_PAGO', color='TIPO_PAGAMENTO',
-                        title='Valor Pago por Cidade e Canal',
-                        labels={'CIDADE': 'Cidade', 'VALOR_PAGO': 'Valor Pago (R$)', 'TIPO_PAGAMENTO': 'Canal'},
-                        barmode='stack'
-                    )
-                    fig_cc.update_layout(xaxis_title="Cidade", yaxis_title="Valor Pago (R$)")
-                    st.plotly_chart(fig_cc, use_container_width=True, key="fig_cidade_canal")
-
-            if tem_diretoria:
-                st.subheader("Análise por Diretoria")
-                diretoria_resumo = df_pagamentos_campanha.groupby('DIRETORIA').agg(
-                    Clientes_que_Pagaram=('MATRICULA', 'nunique'),
-                    Valor_Arrecadado=('VALOR_PAGO', 'sum')
-                ).reset_index().sort_values('Valor_Arrecadado', ascending=False)
-
-                fig_dir_valor = px.bar(
-                    diretoria_resumo, x='DIRETORIA', y='Valor_Arrecadado',
-                    title='Valor Arrecadado por Diretoria',
-                    labels={'DIRETORIA': 'Diretoria', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
-                    hover_data={'Valor_Arrecadado': ':.2f'}
-                )
-                fig_dir_valor = add_bar_labels(fig_dir_valor, 'valor')
-                fig_dir_valor.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Arrecadado (R$)")
-                st.plotly_chart(fig_dir_valor, use_container_width=True, key="fig_dir_valor")
-
-                fig_dir_cli = px.bar(
-                    diretoria_resumo, x='DIRETORIA', y='Clientes_que_Pagaram',
-                    title='Clientes que Pagaram por Diretoria',
-                    labels={'DIRETORIA': 'Diretoria', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
-                )
-                fig_dir_cli = add_bar_labels(fig_dir_cli, 'qtd')
-                fig_dir_cli.update_layout(xaxis_title="Diretoria", yaxis_title="Clientes que Pagaram")
-                st.plotly_chart(fig_dir_cli, use_container_width=True, key="fig_dir_cli")
-
-                tab_dir = diretoria_resumo.copy()
-                tab_dir.columns = ['Diretoria', 'Clientes que Pagaram', 'Valor Arrecadado']
-                tab_dir['Valor Arrecadado'] = tab_dir['Valor Arrecadado'].apply(fmt_brl)
-                st.dataframe(tab_dir, use_container_width=True, hide_index=True)
-
-                if 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
-                    st.subheader("Canal de Pagamento por Diretoria")
-                    dir_canal = df_pagamentos_campanha.groupby(['DIRETORIA', 'TIPO_PAGAMENTO'])['VALOR_PAGO'].sum().reset_index()
-                    fig_dc = px.bar(
-                        dir_canal, x='DIRETORIA', y='VALOR_PAGO', color='TIPO_PAGAMENTO',
-                        title='Valor Pago por Diretoria e Canal',
-                        labels={'DIRETORIA': 'Diretoria', 'VALOR_PAGO': 'Valor Pago (R$)', 'TIPO_PAGAMENTO': 'Canal'},
-                        barmode='stack'
-                    )
-                    fig_dc.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Pago (R$)")
-                    st.plotly_chart(fig_dc, use_container_width=True, key="fig_dir_canal")
-
-            if not tem_cidade and not tem_diretoria:
-                st.info("Colunas 'CIDADE' e 'DIRETORIA' não encontradas na base de clientes.")
-        else:
-            st.info("Nenhum pagamento encontrado dentro da janela definida.")
-
-    # ── ABA 3 — FATURAS ───────────────────────────────────────
-    with aba3:
-        if not df_pagamentos_campanha.empty:
-
-            if 'VENCIMENTO' in df_pagamentos_campanha.columns:
-                st.subheader("Antiguidade da Dívida Paga")
-                df_pagamentos_campanha['ANTIGUIDADE_DIAS'] = (
-                    df_pagamentos_campanha['DATA_PAGAMENTO'] - df_pagamentos_campanha['VENCIMENTO']
-                ).dt.days
-
-                def classificar_antiguidade(dias):
-                    if pd.isna(dias):  return 'Não informado'
-                    elif dias <= 10:   return '0-10 dias'
-                    elif dias <= 20:   return '11-20 dias'
-                    elif dias <= 30:   return '21-30 dias'
-                    elif dias <= 60:   return '31-60 dias'
-                    else:              return 'Mais de 61 dias'
-
-                df_pagamentos_campanha['FAIXA_ANTIGUIDADE'] = df_pagamentos_campanha['ANTIGUIDADE_DIAS'].apply(classificar_antiguidade)
-                ordem_faixas = ['0-10 dias', '11-20 dias', '21-30 dias', '31-60 dias', 'Mais de 61 dias', 'Não informado']
-
-                ant_resumo = df_pagamentos_campanha.groupby('FAIXA_ANTIGUIDADE').agg(
+        # ── ABA 1 — TEMPO ─────────────────────────────────────
+        with aba1:
+            if not df_pagamentos_campanha.empty:
+                st.subheader("Pagamentos por Dia Após o Envio")
+                pagamentos_por_dia = df_pagamentos_campanha.groupby('DIAS_APOS_ENVIO').agg(
                     Quantidade=('MATRICULA', 'count'),
                     Valor_Pago=('VALOR_PAGO', 'sum')
                 ).reset_index()
-                ant_resumo['FAIXA_ANTIGUIDADE'] = pd.Categorical(
-                    ant_resumo['FAIXA_ANTIGUIDADE'], categories=ordem_faixas, ordered=True
-                )
-                ant_resumo = ant_resumo.sort_values('FAIXA_ANTIGUIDADE')
 
-                fig_ant_v = px.bar(
-                    ant_resumo, x='FAIXA_ANTIGUIDADE', y='Valor_Pago',
-                    title='Valor Pago por Faixa de Antiguidade',
-                    labels={'FAIXA_ANTIGUIDADE': 'Faixa de Antiguidade', 'Valor_Pago': 'Valor Pago (R$)'},
+                fig_dia_valor = px.bar(
+                    pagamentos_por_dia, x='DIAS_APOS_ENVIO', y='Valor_Pago',
+                    title='Valor Pago por Dia Após o Envio',
+                    labels={'DIAS_APOS_ENVIO': 'Dias Após o Envio', 'Valor_Pago': 'Valor Pago (R$)'},
                     hover_data={'Valor_Pago': ':.2f'}
                 )
-                fig_ant_v = add_bar_labels(fig_ant_v, 'valor')
-                fig_ant_v.update_layout(xaxis_title="Faixa de Antiguidade", yaxis_title="Valor Pago (R$)")
-                st.plotly_chart(fig_ant_v, use_container_width=True, key="fig_ant_valor")
+                fig_dia_valor = add_bar_labels(fig_dia_valor, 'valor')
+                fig_dia_valor.update_layout(xaxis_title="Dias Após o Envio", yaxis_title="Valor Pago (R$)")
+                st.plotly_chart(fig_dia_valor, use_container_width=True, key="fig_dia_valor")
 
-                fig_ant_q = px.bar(
-                    ant_resumo, x='FAIXA_ANTIGUIDADE', y='Quantidade',
-                    title='Quantidade de Pagamentos por Faixa de Antiguidade',
-                    labels={'FAIXA_ANTIGUIDADE': 'Faixa de Antiguidade', 'Quantidade': 'Quantidade'}
+                fig_dia_qtd = px.bar(
+                    pagamentos_por_dia, x='DIAS_APOS_ENVIO', y='Quantidade',
+                    title='Quantidade de Pagamentos por Dia Após o Envio',
+                    labels={'DIAS_APOS_ENVIO': 'Dias Após o Envio', 'Quantidade': 'Quantidade de Pagamentos'}
                 )
-                fig_ant_q = add_bar_labels(fig_ant_q, 'qtd')
-                fig_ant_q.update_layout(xaxis_title="Faixa de Antiguidade", yaxis_title="Quantidade de Pagamentos")
-                st.plotly_chart(fig_ant_q, use_container_width=True, key="fig_ant_qtd")
+                fig_dia_qtd = add_bar_labels(fig_dia_qtd, 'qtd')
+                fig_dia_qtd.update_layout(xaxis_title="Dias Após o Envio", yaxis_title="Quantidade de Pagamentos")
+                st.plotly_chart(fig_dia_qtd, use_container_width=True, key="fig_dia_qtd")
 
-                tab_ant = ant_resumo.copy()
-                tab_ant.columns = ['Faixa de Antiguidade', 'Quantidade de Pagamentos', 'Valor Pago']
-                tab_ant['Valor Pago'] = tab_ant['Valor Pago'].apply(fmt_brl)
-                st.dataframe(tab_ant, use_container_width=True, hide_index=True)
+                tab_dia = pagamentos_por_dia.copy()
+                tab_dia.columns = ['Dias Após o Envio', 'Quantidade de Pagamentos', 'Valor Pago']
+                tab_dia['Valor Pago'] = tab_dia['Valor Pago'].apply(fmt_brl)
+                st.dataframe(tab_dia, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhum pagamento encontrado dentro da janela definida.")
 
-            if 'MES_ANO_FATURA' in df_pagamentos_campanha.columns:
-                st.subheader("Valor Pago por Mês/Ano da Fatura")
-                mes_resumo = df_pagamentos_campanha.groupby(
-                    ['ANO_FATURA', 'MES_FATURA', 'MES_ANO_FATURA']
-                )['VALOR_PAGO'].sum().reset_index().sort_values(['ANO_FATURA', 'MES_FATURA'])
+        # ── ABA 2 — GEOGRÁFICA ────────────────────────────────
+        with aba2:
+            if not df_pagamentos_campanha.empty:
+                tem_cidade    = 'CIDADE'    in df_pagamentos_campanha.columns
+                tem_diretoria = 'DIRETORIA' in df_pagamentos_campanha.columns
 
-                fig_mes = px.bar(
-                    mes_resumo, x='MES_ANO_FATURA', y='VALOR_PAGO',
-                    title='Valor Pago por Mês/Ano da Fatura',
-                    labels={'MES_ANO_FATURA': 'Mês/Ano', 'VALOR_PAGO': 'Valor Pago (R$)'},
+                if tem_cidade:
+                    st.subheader("Análise por Cidade")
+                    cidade_resumo = df_pagamentos_campanha.groupby('CIDADE').agg(
+                        Clientes_que_Pagaram=('MATRICULA', 'nunique'),
+                        Valor_Arrecadado=('VALOR_PAGO', 'sum')
+                    ).reset_index().sort_values('Valor_Arrecadado', ascending=False)
+
+                    fig_cidade_valor = px.bar(
+                        cidade_resumo, x='CIDADE', y='Valor_Arrecadado',
+                        title='Valor Arrecadado por Cidade',
+                        labels={'CIDADE': 'Cidade', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
+                        hover_data={'Valor_Arrecadado': ':.2f'}
+                    )
+                    fig_cidade_valor = add_bar_labels(fig_cidade_valor, 'valor')
+                    fig_cidade_valor.update_layout(xaxis_title="Cidade", yaxis_title="Valor Arrecadado (R$)")
+                    st.plotly_chart(fig_cidade_valor, use_container_width=True, key="fig_cidade_valor")
+
+                    fig_cidade_cli = px.bar(
+                        cidade_resumo, x='CIDADE', y='Clientes_que_Pagaram',
+                        title='Clientes que Pagaram por Cidade',
+                        labels={'CIDADE': 'Cidade', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
+                    )
+                    fig_cidade_cli = add_bar_labels(fig_cidade_cli, 'qtd')
+                    fig_cidade_cli.update_layout(xaxis_title="Cidade", yaxis_title="Clientes que Pagaram")
+                    st.plotly_chart(fig_cidade_cli, use_container_width=True, key="fig_cidade_cli")
+
+                    tab_cidade = cidade_resumo.copy()
+                    tab_cidade.columns = ['Cidade', 'Clientes que Pagaram', 'Valor Arrecadado']
+                    tab_cidade['Valor Arrecadado'] = tab_cidade['Valor Arrecadado'].apply(fmt_brl)
+                    st.dataframe(tab_cidade, use_container_width=True, hide_index=True)
+
+                    if 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
+                        st.subheader("Canal de Pagamento por Cidade")
+                        cidade_canal = df_pagamentos_campanha.groupby(['CIDADE', 'TIPO_PAGAMENTO'])['VALOR_PAGO'].sum().reset_index()
+                        fig_cc = px.bar(
+                            cidade_canal, x='CIDADE', y='VALOR_PAGO', color='TIPO_PAGAMENTO',
+                            title='Valor Pago por Cidade e Canal',
+                            labels={'CIDADE': 'Cidade', 'VALOR_PAGO': 'Valor Pago (R$)', 'TIPO_PAGAMENTO': 'Canal'},
+                            barmode='stack'
+                        )
+                        fig_cc.update_layout(xaxis_title="Cidade", yaxis_title="Valor Pago (R$)")
+                        st.plotly_chart(fig_cc, use_container_width=True, key="fig_cidade_canal")
+
+                if tem_diretoria:
+                    st.subheader("Análise por Diretoria")
+                    diretoria_resumo = df_pagamentos_campanha.groupby('DIRETORIA').agg(
+                        Clientes_que_Pagaram=('MATRICULA', 'nunique'),
+                        Valor_Arrecadado=('VALOR_PAGO', 'sum')
+                    ).reset_index().sort_values('Valor_Arrecadado', ascending=False)
+
+                    fig_dir_valor = px.bar(
+                        diretoria_resumo, x='DIRETORIA', y='Valor_Arrecadado',
+                        title='Valor Arrecadado por Diretoria',
+                        labels={'DIRETORIA': 'Diretoria', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
+                        hover_data={'Valor_Arrecadado': ':.2f'}
+                    )
+                    fig_dir_valor = add_bar_labels(fig_dir_valor, 'valor')
+                    fig_dir_valor.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Arrecadado (R$)")
+                    st.plotly_chart(fig_dir_valor, use_container_width=True, key="fig_dir_valor")
+
+                    fig_dir_cli = px.bar(
+                        diretoria_resumo, x='DIRETORIA', y='Clientes_que_Pagaram',
+                        title='Clientes que Pagaram por Diretoria',
+                        labels={'DIRETORIA': 'Diretoria', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
+                    )
+                    fig_dir_cli = add_bar_labels(fig_dir_cli, 'qtd')
+                    fig_dir_cli.update_layout(xaxis_title="Diretoria", yaxis_title="Clientes que Pagaram")
+                    st.plotly_chart(fig_dir_cli, use_container_width=True, key="fig_dir_cli")
+
+                    tab_dir = diretoria_resumo.copy()
+                    tab_dir.columns = ['Diretoria', 'Clientes que Pagaram', 'Valor Arrecadado']
+                    tab_dir['Valor Arrecadado'] = tab_dir['Valor Arrecadado'].apply(fmt_brl)
+                    st.dataframe(tab_dir, use_container_width=True, hide_index=True)
+
+                    if 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
+                        st.subheader("Canal de Pagamento por Diretoria")
+                        dir_canal = df_pagamentos_campanha.groupby(['DIRETORIA', 'TIPO_PAGAMENTO'])['VALOR_PAGO'].sum().reset_index()
+                        fig_dc = px.bar(
+                            dir_canal, x='DIRETORIA', y='VALOR_PAGO', color='TIPO_PAGAMENTO',
+                            title='Valor Pago por Diretoria e Canal',
+                            labels={'DIRETORIA': 'Diretoria', 'VALOR_PAGO': 'Valor Pago (R$)', 'TIPO_PAGAMENTO': 'Canal'},
+                            barmode='stack'
+                        )
+                        fig_dc.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Pago (R$)")
+                        st.plotly_chart(fig_dc, use_container_width=True, key="fig_dir_canal")
+
+                if not tem_cidade and not tem_diretoria:
+                    st.info("Colunas 'CIDADE' e 'DIRETORIA' não encontradas na base de clientes.")
+            else:
+                st.info("Nenhum pagamento encontrado dentro da janela definida.")
+
+        # ── ABA 3 — FATURAS ───────────────────────────────────
+        with aba3:
+            if not df_pagamentos_campanha.empty:
+
+                if 'VENCIMENTO' in df_pagamentos_campanha.columns:
+                    st.subheader("Antiguidade da Dívida Paga")
+                    df_pagamentos_campanha['ANTIGUIDADE_DIAS'] = (
+                        df_pagamentos_campanha['DATA_PAGAMENTO'] - df_pagamentos_campanha['VENCIMENTO']
+                    ).dt.days
+
+                    def classificar_antiguidade(dias):
+                        if pd.isna(dias):  return 'Não informado'
+                        elif dias <= 10:   return '0-10 dias'
+                        elif dias <= 20:   return '11-20 dias'
+                        elif dias <= 30:   return '21-30 dias'
+                        elif dias <= 60:   return '31-60 dias'
+                        else:              return 'Mais de 61 dias'
+
+                    df_pagamentos_campanha['FAIXA_ANTIGUIDADE'] = df_pagamentos_campanha['ANTIGUIDADE_DIAS'].apply(classificar_antiguidade)
+                    ordem_faixas = ['0-10 dias', '11-20 dias', '21-30 dias', '31-60 dias', 'Mais de 61 dias', 'Não informado']
+
+                    ant_resumo = df_pagamentos_campanha.groupby('FAIXA_ANTIGUIDADE').agg(
+                        Quantidade=('MATRICULA', 'count'),
+                        Valor_Pago=('VALOR_PAGO', 'sum')
+                    ).reset_index()
+                    ant_resumo['FAIXA_ANTIGUIDADE'] = pd.Categorical(
+                        ant_resumo['FAIXA_ANTIGUIDADE'], categories=ordem_faixas, ordered=True
+                    )
+                    ant_resumo = ant_resumo.sort_values('FAIXA_ANTIGUIDADE')
+
+                    fig_ant_v = px.bar(
+                        ant_resumo, x='FAIXA_ANTIGUIDADE', y='Valor_Pago',
+                        title='Valor Pago por Faixa de Antiguidade',
+                        labels={'FAIXA_ANTIGUIDADE': 'Faixa de Antiguidade', 'Valor_Pago': 'Valor Pago (R$)'},
+                        hover_data={'Valor_Pago': ':.2f'}
+                    )
+                    fig_ant_v = add_bar_labels(fig_ant_v, 'valor')
+                    fig_ant_v.update_layout(xaxis_title="Faixa de Antiguidade", yaxis_title="Valor Pago (R$)")
+                    st.plotly_chart(fig_ant_v, use_container_width=True, key="fig_ant_valor")
+
+                    fig_ant_q = px.bar(
+                        ant_resumo, x='FAIXA_ANTIGUIDADE', y='Quantidade',
+                        title='Quantidade de Pagamentos por Faixa de Antiguidade',
+                        labels={'FAIXA_ANTIGUIDADE': 'Faixa de Antiguidade', 'Quantidade': 'Quantidade'}
+                    )
+                    fig_ant_q = add_bar_labels(fig_ant_q, 'qtd')
+                    fig_ant_q.update_layout(xaxis_title="Faixa de Antiguidade", yaxis_title="Quantidade de Pagamentos")
+                    st.plotly_chart(fig_ant_q, use_container_width=True, key="fig_ant_qtd")
+
+                    tab_ant = ant_resumo.copy()
+                    tab_ant.columns = ['Faixa de Antiguidade', 'Quantidade de Pagamentos', 'Valor Pago']
+                    tab_ant['Valor Pago'] = tab_ant['Valor Pago'].apply(fmt_brl)
+                    st.dataframe(tab_ant, use_container_width=True, hide_index=True)
+
+                if 'MES_ANO_FATURA' in df_pagamentos_campanha.columns:
+                    st.subheader("Valor Pago por Mês/Ano da Fatura")
+                    mes_resumo = df_pagamentos_campanha.groupby(
+                        ['ANO_FATURA', 'MES_FATURA', 'MES_ANO_FATURA']
+                    )['VALOR_PAGO'].sum().reset_index().sort_values(['ANO_FATURA', 'MES_FATURA'])
+
+                    fig_mes = px.bar(
+                        mes_resumo, x='MES_ANO_FATURA', y='VALOR_PAGO',
+                        title='Valor Pago por Mês/Ano da Fatura',
+                        labels={'MES_ANO_FATURA': 'Mês/Ano', 'VALOR_PAGO': 'Valor Pago (R$)'},
+                        hover_data={'VALOR_PAGO': ':.2f'}
+                    )
+                    fig_mes = add_bar_labels(fig_mes, 'valor')
+                    fig_mes.update_layout(xaxis_title="Mês/Ano da Fatura", yaxis_title="Valor Pago (R$)")
+                    st.plotly_chart(fig_mes, use_container_width=True, key="fig_mes_ano")
+
+                    tab_mes = mes_resumo[['MES_ANO_FATURA', 'VALOR_PAGO']].copy()
+                    tab_mes.columns = ['Mês/Ano da Fatura', 'Valor Pago']
+                    tab_mes['Valor Pago'] = tab_mes['Valor Pago'].apply(fmt_brl)
+                    st.dataframe(tab_mes, use_container_width=True, hide_index=True)
+
+                if 'TIPO_FATURA' in df_pagamentos_campanha.columns:
+                    st.subheader("Valor Pago por Tipo de Fatura")
+                    tf_resumo = df_pagamentos_campanha.groupby('TIPO_FATURA').agg(
+                        Quantidade=('MATRICULA', 'count'),
+                        Valor_Pago=('VALOR_PAGO', 'sum')
+                    ).reset_index().sort_values('Valor_Pago', ascending=False)
+
+                    fig_tf = px.bar(
+                        tf_resumo, x='TIPO_FATURA', y='Valor_Pago',
+                        title='Valor Pago por Tipo de Fatura',
+                        labels={'TIPO_FATURA': 'Tipo de Fatura', 'Valor_Pago': 'Valor Pago (R$)'},
+                        color='TIPO_FATURA',
+                        hover_data={'Valor_Pago': ':.2f', 'Quantidade': True}
+                    )
+                    fig_tf = add_bar_labels(fig_tf, 'valor')
+                    fig_tf.update_layout(xaxis_title="Tipo de Fatura", yaxis_title="Valor Pago (R$)", showlegend=False)
+                    st.plotly_chart(fig_tf, use_container_width=True, key="fig_tipo_fatura")
+
+                    tab_tf = tf_resumo.copy()
+                    tab_tf.columns = ['Tipo de Fatura', 'Quantidade', 'Valor Pago']
+                    tab_tf['Valor Pago'] = tab_tf['Valor Pago'].apply(fmt_brl)
+                    st.dataframe(tab_tf, use_container_width=True, hide_index=True)
+
+                if 'UTILIZACAO' in df_pagamentos_campanha.columns:
+                    st.subheader("Valor Pago por Utilização (Sub. Categoria)")
+                    ut_resumo = df_pagamentos_campanha.groupby('UTILIZACAO').agg(
+                        Quantidade=('MATRICULA', 'count'),
+                        Valor_Pago=('VALOR_PAGO', 'sum')
+                    ).reset_index().sort_values('Valor_Pago', ascending=False)
+
+                    fig_ut = px.bar(
+                        ut_resumo, x='UTILIZACAO', y='Valor_Pago',
+                        title='Valor Pago por Utilização',
+                        labels={'UTILIZACAO': 'Utilização', 'Valor_Pago': 'Valor Pago (R$)'},
+                        color='UTILIZACAO',
+                        hover_data={'Valor_Pago': ':.2f', 'Quantidade': True}
+                    )
+                    fig_ut = add_bar_labels(fig_ut, 'valor')
+                    fig_ut.update_layout(xaxis_title="Utilização", yaxis_title="Valor Pago (R$)", showlegend=False)
+                    st.plotly_chart(fig_ut, use_container_width=True, key="fig_utilizacao")
+
+                    tab_ut = ut_resumo.copy()
+                    tab_ut.columns = ['Utilização', 'Quantidade', 'Valor Pago']
+                    tab_ut['Valor Pago'] = tab_ut['Valor Pago'].apply(fmt_brl)
+                    st.dataframe(tab_ut, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhum pagamento encontrado dentro da janela definida.")
+
+        # ── ABA 4 — CANAL DE PAGAMENTO ────────────────────────
+        with aba4:
+            if not df_pagamentos_campanha.empty and 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
+
+                st.subheader("Valor Arrecadado por Canal de Pagamento")
+                canal_valor = df_pagamentos_campanha.groupby('TIPO_PAGAMENTO')['VALOR_PAGO'].sum().reset_index()
+                canal_valor = canal_valor.sort_values('VALOR_PAGO', ascending=False)
+
+                fig_cv = px.bar(
+                    canal_valor, x='TIPO_PAGAMENTO', y='VALOR_PAGO',
+                    title='Valor Arrecadado por Canal de Pagamento',
+                    labels={'TIPO_PAGAMENTO': 'Canal de Pagamento', 'VALOR_PAGO': 'Valor Total Pago (R$)'},
+                    color='TIPO_PAGAMENTO',
                     hover_data={'VALOR_PAGO': ':.2f'}
                 )
-                fig_mes = add_bar_labels(fig_mes, 'valor')
-                fig_mes.update_layout(xaxis_title="Mês/Ano da Fatura", yaxis_title="Valor Pago (R$)")
-                st.plotly_chart(fig_mes, use_container_width=True, key="fig_mes_ano")
+                fig_cv = add_bar_labels(fig_cv, 'valor')
+                fig_cv.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Valor Total Pago (R$)", showlegend=False)
+                st.plotly_chart(fig_cv, use_container_width=True, key="fig_canal_valor")
 
-                tab_mes = mes_resumo[['MES_ANO_FATURA', 'VALOR_PAGO']].copy()
-                tab_mes.columns = ['Mês/Ano da Fatura', 'Valor Pago']
-                tab_mes['Valor Pago'] = tab_mes['Valor Pago'].apply(fmt_brl)
-                st.dataframe(tab_mes, use_container_width=True, hide_index=True)
+                st.subheader("Clientes que Pagaram por Canal")
+                canal_cli = df_pagamentos_campanha.groupby('TIPO_PAGAMENTO')['MATRICULA'].nunique().reset_index()
+                canal_cli.rename(columns={'MATRICULA': 'Clientes que Pagaram'}, inplace=True)
+                canal_cli = canal_cli.sort_values('Clientes que Pagaram', ascending=False)
 
-            if 'TIPO_FATURA' in df_pagamentos_campanha.columns:
-                st.subheader("Valor Pago por Tipo de Fatura")
-                tf_resumo = df_pagamentos_campanha.groupby('TIPO_FATURA').agg(
-                    Quantidade=('MATRICULA', 'count'),
-                    Valor_Pago=('VALOR_PAGO', 'sum')
-                ).reset_index().sort_values('Valor_Pago', ascending=False)
-
-                fig_tf = px.bar(
-                    tf_resumo, x='TIPO_FATURA', y='Valor_Pago',
-                    title='Valor Pago por Tipo de Fatura',
-                    labels={'TIPO_FATURA': 'Tipo de Fatura', 'Valor_Pago': 'Valor Pago (R$)'},
-                    color='TIPO_FATURA',
-                    hover_data={'Valor_Pago': ':.2f', 'Quantidade': True}
+                fig_cc = px.bar(
+                    canal_cli, x='TIPO_PAGAMENTO', y='Clientes que Pagaram',
+                    title='Clientes que Pagaram por Canal',
+                    labels={'TIPO_PAGAMENTO': 'Canal de Pagamento', 'Clientes que Pagaram': 'Clientes que Pagaram'},
+                    color='TIPO_PAGAMENTO'
                 )
-                fig_tf = add_bar_labels(fig_tf, 'valor')
-                fig_tf.update_layout(xaxis_title="Tipo de Fatura", yaxis_title="Valor Pago (R$)", showlegend=False)
-                st.plotly_chart(fig_tf, use_container_width=True, key="fig_tipo_fatura")
+                fig_cc = add_bar_labels(fig_cc, 'qtd')
+                fig_cc.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Clientes que Pagaram", showlegend=False)
+                st.plotly_chart(fig_cc, use_container_width=True, key="fig_canal_cli")
 
-                tab_tf = tf_resumo.copy()
-                tab_tf.columns = ['Tipo de Fatura', 'Quantidade', 'Valor Pago']
-                tab_tf['Valor Pago'] = tab_tf['Valor Pago'].apply(fmt_brl)
-                st.dataframe(tab_tf, use_container_width=True, hide_index=True)
+                tab_canal = pd.merge(canal_valor, canal_cli, on='TIPO_PAGAMENTO')
+                tab_canal.columns = ['Canal de Pagamento', 'Valor Total Pago', 'Clientes que Pagaram']
+                tab_canal['Valor Total Pago'] = tab_canal['Valor Total Pago'].apply(fmt_brl)
+                st.dataframe(tab_canal, use_container_width=True, hide_index=True)
+            else:
+                st.info("Coluna 'TIPO_PAGAMENTO' não encontrada nos dados de pagamento.")
 
-            if 'UTILIZACAO' in df_pagamentos_campanha.columns:
-                st.subheader("Valor Pago por Utilização (Sub. Categoria)")
-                ut_resumo = df_pagamentos_campanha.groupby('UTILIZACAO').agg(
-                    Quantidade=('MATRICULA', 'count'),
-                    Valor_Pago=('VALOR_PAGO', 'sum')
-                ).reset_index().sort_values('Valor_Pago', ascending=False)
-
-                fig_ut = px.bar(
-                    ut_resumo, x='UTILIZACAO', y='Valor_Pago',
-                    title='Valor Pago por Utilização',
-                    labels={'UTILIZACAO': 'Utilização', 'Valor_Pago': 'Valor Pago (R$)'},
-                    color='UTILIZACAO',
-                    hover_data={'Valor_Pago': ':.2f', 'Quantidade': True}
+            # ── ABA 5 — DETALHES ──────────────────────────────────────
+        with aba5:
+            if not df_pagamentos_campanha.empty:
+                st.subheader("Detalhes dos Pagamentos Atribuídos à Campanha")
+    
+                colunas_possiveis = [
+                    'MATRICULA', 'CIDADE', 'DIRETORIA', 'TELEFONE_ENVIO',
+                    'DATA_ENVIO', 'DATA_PAGAMENTO', 'VENCIMENTO',
+                    'VALOR_PAGO', 'DIAS_APOS_ENVIO',
+                    'TIPO_FATURA', 'UTILIZACAO', 'TIPO_PAGAMENTO'
+                ]
+                colunas_exibir = [c for c in colunas_possiveis if c in df_pagamentos_campanha.columns]
+                df_detalhes    = df_pagamentos_campanha[colunas_exibir].drop_duplicates(
+                    subset=['MATRICULA', 'DATA_PAGAMENTO', 'VALOR_PAGO']
                 )
-                fig_ut = add_bar_labels(fig_ut, 'valor')
-                fig_ut.update_layout(xaxis_title="Utilização", yaxis_title="Valor Pago (R$)", showlegend=False)
-                st.plotly_chart(fig_ut, use_container_width=True, key="fig_utilizacao")
-
-                tab_ut = ut_resumo.copy()
-                tab_ut.columns = ['Utilização', 'Quantidade', 'Valor Pago']
-                tab_ut['Valor Pago'] = tab_ut['Valor Pago'].apply(fmt_brl)
-                st.dataframe(tab_ut, use_container_width=True, hide_index=True)
+    
+                st.dataframe(df_detalhes, use_container_width=True, hide_index=True)
+    
+                csv_output = df_detalhes.to_csv(index=False, sep=';', decimal=',')
+                st.download_button(
+                    label="⬇️ Baixar CSV dos Pagamentos",
+                    data=csv_output,
+                    file_name="pagamentos_campanha.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info("Nenhum pagamento encontrado dentro da janela definida.")
+    
+    # ══════════════════════════════════════════════════════════════
+    # MENSAGENS QUANDO ANÁLISE NÃO É EXECUTADA
+    # ══════════════════════════════════════════════════════════════
+    
+    elif executar_analise and not dados_prontos:
+        if campanha_selecionada is None:
+            st.warning("Selecione uma campanha antes de executar a análise.")
+        elif df_pagamentos is None:
+            st.warning("Base de pagamentos não disponível. Um administrador precisa fazer o upload.")
+        elif df_envios is None:
+            st.warning("Não foi possível carregar os envios da campanha selecionada.")
+        elif df_clientes is None:
+            st.warning("Não foi possível carregar os clientes da campanha selecionada.")
+    
+    elif not executar_analise:
+        if campanha_selecionada is None:
+            st.info("👈 Selecione uma campanha na barra lateral para começar.")
         else:
-            st.info("Nenhum pagamento encontrado dentro da janela definida.")
+            st.info("👈 Clique em **Executar Análise** na barra lateral para gerar os resultados.")
 
-    # ── ABA 4 — CANAL DE PAGAMENTO ────────────────────────────
-    with aba4:
-        if not df_pagamentos_campanha.empty and 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
 
-            st.subheader("Valor Arrecadado por Canal de Pagamento")
-            canal_valor = df_pagamentos_campanha.groupby('TIPO_PAGAMENTO')['VALOR_PAGO'].sum().reset_index()
-            canal_valor = canal_valor.sort_values('VALOR_PAGO', ascending=False)
-
-            fig_cv = px.bar(
-                canal_valor, x='TIPO_PAGAMENTO', y='VALOR_PAGO',
-                title='Valor Arrecadado por Canal de Pagamento',
-                labels={'TIPO_PAGAMENTO': 'Canal de Pagamento', 'VALOR_PAGO': 'Valor Total Pago (R$)'},
-                color='TIPO_PAGAMENTO',
-                hover_data={'VALOR_PAGO': ':.2f'}
-            )
-            fig_cv = add_bar_labels(fig_cv, 'valor')
-            fig_cv.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Valor Total Pago (R$)", showlegend=False)
-            st.plotly_chart(fig_cv, use_container_width=True, key="fig_canal_valor")
-
-            st.subheader("Clientes que Pagaram por Canal")
-            canal_cli = df_pagamentos_campanha.groupby('TIPO_PAGAMENTO')['MATRICULA'].nunique().reset_index()
-            canal_cli.rename(columns={'MATRICULA': 'Clientes que Pagaram'}, inplace=True)
-            canal_cli = canal_cli.sort_values('Clientes que Pagaram', ascending=False)
-
-            fig_cc = px.bar(
-                canal_cli, x='TIPO_PAGAMENTO', y='Clientes que Pagaram',
-                title='Clientes que Pagaram por Canal',
-                labels={'TIPO_PAGAMENTO': 'Canal de Pagamento', 'Clientes que Pagaram': 'Clientes que Pagaram'},
-                color='TIPO_PAGAMENTO'
-            )
-            fig_cc = add_bar_labels(fig_cc, 'qtd')
-            fig_cc.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Clientes que Pagaram", showlegend=False)
-            st.plotly_chart(fig_cc, use_container_width=True, key="fig_canal_cli")
-
-            tab_canal = pd.merge(canal_valor, canal_cli, on='TIPO_PAGAMENTO')
-            tab_canal.columns = ['Canal de Pagamento', 'Valor Total Pago', 'Clientes que Pagaram']
-            tab_canal['Valor Total Pago'] = tab_canal['Valor Total Pago'].apply(fmt_brl)
-            st.dataframe(tab_canal, use_container_width=True, hide_index=True)
-        else:
-            st.info("Coluna 'TIPO_PAGAMENTO' não encontrada nos dados de pagamento.")
-
-    # ── ABA 5 — DETALHES ──────────────────────────────────────
-    with aba5:
-        if not df_pagamentos_campanha.empty:
-            st.subheader("Detalhes dos Pagamentos Atribuídos à Campanha")
-
-            colunas_possiveis = [
-                'MATRICULA', 'CIDADE', 'DIRETORIA', 'TELEFONE_ENVIO',
-                'DATA_ENVIO', 'DATA_PAGAMENTO', 'VENCIMENTO',
-                'VALOR_PAGO', 'DIAS_APOS_ENVIO',
-                'TIPO_FATURA', 'UTILIZACAO', 'TIPO_PAGAMENTO'
-            ]
-            colunas_exibir = [c for c in colunas_possiveis if c in df_pagamentos_campanha.columns]
-            df_detalhes    = df_pagamentos_campanha[colunas_exibir].drop_duplicates(
-                subset=['MATRICULA', 'DATA_PAGAMENTO', 'VALOR_PAGO']
-            )
-
-            st.dataframe(df_detalhes, use_container_width=True, hide_index=True)
-
-            csv_output = df_detalhes.to_csv(index=False, sep=';', decimal=',')
-            st.download_button(
-                label="⬇️ Baixar CSV dos Pagamentos",
-                data=csv_output,
-                file_name="pagamentos_campanha.csv",
-                mime="text/csv"
-            )
-        else:
-            st.info("Nenhum pagamento encontrado dentro da janela definida.")
-
-elif executar_analise and not dados_prontos:
-    if campanha_selecionada is None:
-        st.warning("Selecione uma campanha antes de executar a análise.")
-    elif df_pagamentos is None:
-        st.warning("Base de pagamentos não disponível. Um administrador precisa fazer o upload.")
