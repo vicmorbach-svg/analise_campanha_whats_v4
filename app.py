@@ -442,6 +442,67 @@ if st.sidebar.button("Sair"):
 
 st.sidebar.markdown("---")
 
+# ══════════════════════════════════════════════════════════════
+# DIAGNÓSTICO GITHUB — remova após resolver o problema
+# ══════════════════════════════════════════════════════════════
+
+if is_admin():
+    with st.sidebar.expander("🔍 Diagnóstico GitHub"):
+        token, repo, branch = get_github_config()
+        st.code(f"repo:   {repo}\nbranch: {branch}")
+
+        if st.button("Listar arquivos em /data"):
+            url = f"https://api.github.com/repos/{repo}/contents/data?ref={branch}"
+            r   = requests.get(url, headers=get_github_headers())
+            if r.status_code == 200:
+                arquivos = [item['path'] for item in r.json()]
+                st.success(f"{len(arquivos)} item(s) encontrado(s):")
+                for a in arquivos:
+                    st.code(a)
+            else:
+                st.error(f"Erro {r.status_code}: {r.text}")
+
+        if st.button("Listar arquivos em /data/campanhas"):
+            url = f"https://api.github.com/repos/{repo}/contents/data/campanhas?ref={branch}"
+            r   = requests.get(url, headers=get_github_headers())
+            if r.status_code == 200:
+                arquivos = [item['path'] for item in r.json()]
+                st.success(f"{len(arquivos)} item(s) encontrado(s):")
+                for a in arquivos:
+                    st.code(a)
+            else:
+                st.error(f"Erro {r.status_code}: {r.text}")
+
+        if st.button("Verificar meta"):
+            content, sha = get_file_from_github(META_PATH)
+            if content:
+                df_test = parquet_bytes_to_df(content)
+                st.success(f"Meta encontrada! {len(df_test)} campanha(s):")
+                st.dataframe(df_test)
+            else:
+                st.error(f"Meta não encontrada em: {META_PATH}")
+
+        if st.button("Verificar pagamentos"):
+            content, sha = get_file_from_github(PAG_PATH)
+            if content:
+                df_test = parquet_bytes_to_df(content)
+                st.success(f"Pagamentos encontrados! {len(df_test):,} registros")
+                st.dataframe(df_test.head(3))
+            else:
+                st.error(f"Pagamentos não encontrados em: {PAG_PATH}")
+
+        if st.button("Testar gravação"):
+            df_teste = pd.DataFrame([{'teste': 'ok', 'ts': str(pd.Timestamp.now())}])
+            ok = save_file_to_github(
+                "data/teste_gravacao.parquet",
+                df_to_parquet_bytes(df_teste),
+                "teste de gravação"
+            )
+            if ok:
+                st.success("Gravação funcionando!")
+            else:
+                st.error("Falha na gravação. Verifique o token e permissões.")
+
 # ── Sidebar: seleção de campanha ─────────────────────────────
 st.sidebar.header("📋 Campanha")
 
