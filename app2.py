@@ -543,7 +543,7 @@ if is_admin():
         nome_nova = st.text_input("Nome da campanha", key="nome_nova_campanha_input")
         uploaded_envios_admin   = st.file_uploader("Base de Envios (.xlsx)",   type=["xlsx"], key="up_env")
         uploaded_clientes_admin = st.file_uploader("Base de Clientes (.xlsx)", type=["xlsx"], key="up_cli")
-        if st.button("💾 Salvar campanha"):
+        if st.button("💾 Salvar campanha", key="salvar_campanha_btn"):
             if not nome_nova.strip():
                 st.error("Informe um nome para a campanha.")
             elif uploaded_envios_admin is None:
