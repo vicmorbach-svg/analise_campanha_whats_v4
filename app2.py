@@ -532,7 +532,7 @@ st.sidebar.markdown("---")
 # ── Sidebar: configurações da análise ────────────────────────
 st.sidebar.header("⚙️ Configurações")
 janela_dias = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7, key="janela_dias_slider")
-executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True)
+executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True, key="executar_analise_btn")
 
 # ── Sidebar: área administrativa (somente admin) ──────────────
 if is_admin():
