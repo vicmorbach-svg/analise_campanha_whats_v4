@@ -540,7 +540,7 @@ if is_admin():
     st.sidebar.header("🔧 Administração")
 
     with st.sidebar.expander("➕ Nova Campanha"):
-        nome_nova               = st.text_input("Nome da campanha")
+        nome_nova = st.text_input("Nome da campanha", key="nome_nova_campanha_input")
         uploaded_envios_admin   = st.file_uploader("Base de Envios (.xlsx)",   type=["xlsx"], key="up_env")
         uploaded_clientes_admin = st.file_uploader("Base de Clientes (.xlsx)", type=["xlsx"], key="up_cli")
         if st.button("💾 Salvar campanha"):
