@@ -1333,12 +1333,12 @@ if executar_analise and dados_prontos:
 elif executar_analise and not dados_prontos:
     if not campanhas_selecionadas_ids:
         st.warning("Selecione uma ou mais campanhas antes de executar a análise.")
-    elif df_pagamentos is None:
-        st.warning("Base de pagamentos não disponível. Um administrador precisa fazer o upload.")
+    elif df_pagamentos is None or df_pagamentos.empty:
+        st.warning("Base de pagamentos não disponível ou vazia. Um administrador precisa fazer o upload.")
     elif df_envios_agregado is None or df_envios_agregado.empty:
-        st.warning("Não foi possível carregar os envios das campanhas selecionadas.")
+        st.warning("Não foi possível carregar os envios das campanhas selecionadas ou a base está vazia.")
     elif df_clientes_agregado is None or df_clientes_agregado.empty:
-        st.warning("Não foi possível carregar os clientes das campanhas selecionadas.")
+        st.warning("Não foi possível carregar os clientes das campanhas selecionadas ou a base está vazia.")
 
 elif not executar_analise:
     if not campanhas_selecionadas_ids:
