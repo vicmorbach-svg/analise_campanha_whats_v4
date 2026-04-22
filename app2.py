@@ -57,22 +57,29 @@ def is_admin():
 # --- Configurações da Página ---
 st.set_page_config(layout="wide", page_title="Análise de campanha de cobrança")
 
-# --- Variáveis de Ambiente e Segredos ---
-# ATENÇÃO: Substitua "Victor", "analise_campanha_whats_v4" e "ghp_SEU_TOKEN_AQUI"
-# pelos seus dados reais do GitHub.
-# O token precisa ter permissões de 'repo' para ler e escrever arquivos.
-GITHUB_REPO_OWNER = "Victor"
-GITHUB_REPO_NAME  = "analise_campanha_whats_v4"
-GITHUB_TOKEN      = "ghp_SEU_TOKEN_AQUI" # <--- SUBSTITUA ESTE TOKEN PELO SEU TOKEN REAL DO GITHUB
+# --- Funções para obter configurações do GitHub ---
+def get_github_config():
+    try:
+        repo_owner   = st.secrets["github"]["repo_owner"]
+        repo_name    = st.secrets["github"]["repo_name"]
+        access_token = st.secrets["github"]["access_token"]
+        branch       = st.secrets["github"].get("branch", "main") # Default to 'main'
+        return repo_owner, repo_name, access_token, branch
+    except KeyError as e:
+        st.error(f"Erro de configuração: A chave '{e}' não foi encontrada em `st.secrets['github']`. "
+                 "Por favor, configure seus segredos do GitHub corretamente no Streamlit Cloud.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Erro ao carregar configurações do GitHub: {e}. "
+                 "Verifique se seus segredos do GitHub estão configurados corretamente.")
+        st.stop()
 
-# Verifique se o token foi substituído
-if GITHUB_TOKEN == "ghp_SEU_TOKEN_AQUI":
-    st.error("🚨 ERRO: Por favor, substitua 'ghp_SEU_TOKEN_AQUI' pelo seu Personal Access Token (PAT) real do GitHub no código.")
-    st.stop() # Interrompe a execução do aplicativo até que o token seja configurado.
+# Carregar configurações do GitHub no início
+REPO_OWNER, REPO_NAME, ACCESS_TOKEN, BRANCH = get_github_config()
 
-GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents"
+GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents"
 HEADERS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
+    "Authorization": f"token {ACCESS_TOKEN}",
     "Accept": "application/vnd.github.v3+json"
 }
 
@@ -83,94 +90,89 @@ HEADERS = {
 @st.cache_data(ttl=3600) # Cache por 1 hora
 def get_file_from_github(path):
     try:
-        response = requests.get(f"{GITHUB_API_URL}/{path}", headers=HEADERS)
-        if response.status_code == 401:
-            st.error(f"Erro de autenticação (401) ao acessar {path}. Verifique seu GITHUB_TOKEN e suas permissões.")
-            return None, None
-        response.raise_for_status() # Levanta um erro para outros códigos de status HTTP
-        content = response.json()
-        if content and 'content' in content:
-            # Para arquivos grandes, o GitHub pode retornar um URL de download direto
-            if 'download_url' in content and content['size'] > (1024 * 1024): # Se for maior que 1MB
-                raw_response = requests.get(content['download_url'], headers={"Authorization": f"token {GITHUB_TOKEN}"})
-                raw_response.raise_for_status()
-                return raw_response.content, content['sha']
-            else:
-                return base64.b64decode(content['content']), content['sha']
-        return None, None
+        response = requests.get(f"{GITHUB_API_URL}/{path}?ref={BRANCH}", headers=HEADERS)
+        if response.status_code == 200:
+            content = base64.b64decode(response.json()['content'])
+            sha = response.json()['sha']
+            return content, sha
+        elif response.status_code == 404:
+            return None, None # Arquivo não encontrado
+        elif response.status_code == 401:
+            st.error("Erro de autenticação (401): Seu token do GitHub pode estar inválido ou sem permissões. "
+                     "Verifique o 'access_token' em `st.secrets` e as permissões do token (escopo 'repo').")
+            st.stop()
+        else:
+            st.error(f"Erro ao acessar GitHub para {path}: {response.status_code} {response.text}")
+            st.stop()
     except requests.exceptions.RequestException as e:
-        st.error(f"Erro ao acessar GitHub para {path}: {e}")
-        return None, None
+        st.error(f"Erro de conexão ao GitHub para {path}: {e}")
+        st.stop()
+    return None, None
+
+def get_file_sha(path):
+    try:
+        response = requests.get(f"{GITHUB_API_URL}/{path}?ref={BRANCH}", headers=HEADERS)
+        if response.status_code == 200:
+            return response.json()['sha']
+        elif response.status_code == 404:
+            return None
+        elif response.status_code == 401:
+            st.error("Erro de autenticação (401): Seu token do GitHub pode estar inválido ou sem permissões. "
+                     "Verifique o 'access_token' em `st.secrets` e as permissões do token (escopo 'repo').")
+            st.stop()
+        else:
+            st.error(f"Erro ao obter SHA do GitHub para {path}: {response.status_code} {response.text}")
+            st.stop()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erro de conexão ao GitHub para {path}: {e}")
+        st.stop()
+    return None
 
 def save_file_to_github(path, content_bytes, message):
-    sha = None
-    # Tenta obter o SHA apenas se o arquivo já existir
-    try:
-        response = requests.get(f"{GITHUB_API_URL}/{path}", headers=HEADERS)
-        if response.status_code == 200:
-            sha = response.json().get("sha")
-        elif response.status_code == 404:
-            sha = None # Arquivo não existe, é uma criação
-        elif response.status_code == 401:
-            st.error(f"Erro de autenticação (401) ao tentar salvar {path}. Verifique seu GITHUB_TOKEN e suas permissões.")
-            return False
-        else:
-            response.raise_for_status() # Levanta erro para outros status
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erro ao verificar SHA para {path}: {e}")
-        return False
-
-    url     = f"{GITHUB_API_URL}/{path}"
+    sha = get_file_sha(path)
     payload = {
         "message": message,
         "content": base64.b64encode(content_bytes).decode("utf-8"),
-        "branch":  "main" # Assumindo que a branch principal é 'main'
+        "branch": BRANCH
     }
     if sha:
         payload["sha"] = sha
 
     try:
-        r = requests.put(url, headers=HEADERS, data=json.dumps(payload))
-        if r.status_code == 401:
-            st.error(f"Erro de autenticação (401) ao tentar salvar {path}. Verifique seu GITHUB_TOKEN e suas permissões.")
+        response = requests.put(f"{GITHUB_API_URL}/{path}", headers=HEADERS, data=json.dumps(payload))
+        if response.status_code in [200, 201]:
+            st.cache_data.clear() # Limpa o cache após salvar
+            return True
+        elif response.status_code == 401:
+            st.error("Erro de autenticação (401): Seu token do GitHub pode estar inválido ou sem permissões. "
+                     "Verifique o 'access_token' em `st.secrets` e as permissões do token (escopo 'repo').")
             return False
-        r.raise_for_status()
-        return True
+        else:
+            st.error(f"Erro ao salvar {path} no GitHub: {response.status_code} {response.text}")
+            return False
     except requests.exceptions.RequestException as e:
-        st.error(f"Erro ao salvar no GitHub para {path}: {e}")
+        st.error(f"Erro de conexão ao GitHub ao salvar {path}: {e}")
         return False
 
 def delete_file_from_github(path, message):
-    sha = None
+    sha = get_file_sha(path)
+    if not sha:
+        return True # Arquivo já não existe
+    payload = {"message": message, "sha": sha, "branch": BRANCH}
     try:
-        response = requests.get(f"{GITHUB_API_URL}/{path}", headers=HEADERS)
+        response = requests.delete(f"{GITHUB_API_URL}/{path}", headers=HEADERS, data=json.dumps(payload))
         if response.status_code == 200:
-            sha = response.json().get("sha")
-        elif response.status_code == 404:
-            return True # Arquivo já não existe
+            st.cache_data.clear() # Limpa o cache após deletar
+            return True
         elif response.status_code == 401:
-            st.error(f"Erro de autenticação (401) ao tentar deletar {path}. Verifique seu GITHUB_TOKEN e suas permissões.")
+            st.error("Erro de autenticação (401): Seu token do GitHub pode estar inválido ou sem permissões. "
+                     "Verifique o 'access_token' em `st.secrets` e as permissões do token (escopo 'repo').")
             return False
         else:
-            response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erro ao verificar SHA para deletar {path}: {e}")
-        return False
-
-    if not sha:
-        return True # Não há SHA, então o arquivo não existe ou já foi deletado
-
-    url     = f"{GITHUB_API_URL}/{path}"
-    payload = {"message": message, "sha": sha, "branch": "main"}
-    try:
-        r = requests.delete(url, headers=HEADERS, data=json.dumps(payload))
-        if r.status_code == 401:
-            st.error(f"Erro de autenticação (401) ao tentar deletar {path}. Verifique seu GITHUB_TOKEN e suas permissões.")
+            st.error(f"Erro ao deletar {path} do GitHub: {response.status_code} {response.text}")
             return False
-        r.raise_for_status()
-        return True
     except requests.exceptions.RequestException as e:
-        st.error(f"Erro ao deletar do GitHub para {path}: {e}")
+        st.error(f"Erro de conexão ao GitHub ao deletar {path}: {e}")
         return False
 
 def df_to_parquet_bytes(df):
@@ -181,23 +183,17 @@ def df_to_parquet_bytes(df):
 
 def parquet_bytes_to_df(content_bytes):
     if content_bytes is None or len(content_bytes) == 0:
-        # st.error("Conteúdo do arquivo está vazio (0 bytes).") # Removido para evitar spam de erro em arquivos vazios esperados
-        return pd.DataFrame() # Retorna DataFrame vazio em vez de None
+        return pd.DataFrame() # Retorna DataFrame vazio para conteúdo vazio
     try:
         buf = io.BytesIO(content_bytes)
         buf.seek(0)
         return pd.read_parquet(buf, engine='pyarrow')
-    except Exception as e1:
-        try:
-            buf = io.BytesIO(content_bytes)
-            buf.seek(0)
-            return pd.read_parquet(buf, engine='fastparquet')
-        except Exception as e2:
-            st.error(f"Erro ao ler parquet — pyarrow: {e1} | fastparquet: {e2}")
-            return pd.DataFrame() # Retorna DataFrame vazio em caso de erro
+    except Exception as e:
+        st.error(f"Erro ao ler arquivo Parquet: {e}")
+        return pd.DataFrame()
 
 # ══════════════════════════════════════════════════════════════
-# FUNÇÕES DE PROCESSAMENTO DE DADOS (Mantidas como estão no seu script)
+# FUNÇÕES DE PROCESSAMENTO DE DADOS (Mantidas como estão)
 # ══════════════════════════════════════════════════════════════
 
 @st.cache_data
@@ -380,19 +376,57 @@ def load_and_process_clientes(uploaded_file):
         st.sidebar.error(f"Erro ao processar arquivo de Clientes: {e}")
         return None
 
+# Função auxiliar para formatar valores em R$
+def fmt_brl(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+# Função auxiliar para adicionar rótulos de valor nas barras
+def add_bar_labels(fig, formato='valor'):
+    for trace in fig.data:
+        if hasattr(trace, 'y') and trace.y is not None:
+            if formato == 'valor':
+                texts = [fmt_brl(v) if v is not None else '' for v in trace.y]
+            else:
+                texts = [str(int(v)) if v is not None else '' for v in trace.y]
+            trace.text = texts
+            trace.textposition = 'outside'
+            trace.textfont = dict(size=11)
+    fig.update_layout(uniformtext_minsize=8, uniformtext_mode='hide')
+    return fig
+
 # ══════════════════════════════════════════════════════════════
-# FUNÇÕES DE GERENCIAMENTO DE CAMPANHAS
+# CAMPANHAS (META, CARREGAMENTO, SALVAMENTO)
 # ══════════════════════════════════════════════════════════════
 
 META_PATH = "data/campanhas_meta.parquet"
 PAG_PATH  = "data/pagamentos.parquet"
 
+@st.cache_data(ttl=600) # Cache por 10 minutos
 def load_campanhas_meta():
     content, _ = get_file_from_github(META_PATH)
-    df = parquet_bytes_to_df(content)
-    if df.empty:
-        return pd.DataFrame(columns=['id', 'nome', 'criado_em', 'total_envios', 'total_clientes'])
-    return df
+    if content:
+        df = parquet_bytes_to_df(content)
+        if not df.empty:
+            df['criado_em'] = pd.to_datetime(df['criado_em'])
+            return df
+    return pd.DataFrame(columns=['id', 'nome', 'criado_em', 'total_envios', 'total_clientes'])
+
+@st.cache_data(ttl=600)
+def load_pagamentos_geral():
+    content, _ = get_file_from_github(PAG_PATH)
+    if content:
+        return parquet_bytes_to_df(content)
+    return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def load_campanha_envios(campanha_id):
+    content, _ = get_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet")
+    return parquet_bytes_to_df(content)
+
+@st.cache_data(ttl=600)
+def load_campanha_clientes(campanha_id):
+    content, _ = get_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet")
+    return parquet_bytes_to_df(content)
 
 def save_campanha(nome, df_envios, df_clientes):
     campanha_id = str(uuid.uuid4())[:8]
@@ -410,6 +444,7 @@ def save_campanha(nome, df_envios, df_clientes):
     )
     if not ok_clientes:
         return None, "Envios salvos, mas erro ao salvar clientes."
+
     df_meta = load_campanhas_meta()
     nova = pd.DataFrame([{
         'id':             campanha_id,
@@ -425,8 +460,8 @@ def save_campanha(nome, df_envios, df_clientes):
         f"Meta: campanha {nome} criada"
     )
     if not ok_meta:
-        return None, "Arquivos salvos, mas erro ao salvar metadados."
-    return campanha_id, None
+        return None, "Erro ao atualizar metadados da campanha."
+    return campanha_id, "Campanha criada com sucesso!"
 
 def update_campanha_data(campanha_id, nome_campanha, new_df_envios, new_df_clientes):
     # Carregar dados existentes
@@ -445,7 +480,7 @@ def update_campanha_data(campanha_id, nome_campanha, new_df_envios, new_df_clien
     ok_envios = save_file_to_github(
         f"data/campanhas/{campanha_id}_envios.parquet",
         df_to_parquet_bytes(combined_df_envios),
-        f"Campanha {nome_campanha}: envios atualizados"
+        f"Campanha {nome_campanha}: dados de envios atualizados"
     )
     if not ok_envios:
         return False, "Erro ao atualizar envios no GitHub."
@@ -453,10 +488,10 @@ def update_campanha_data(campanha_id, nome_campanha, new_df_envios, new_df_clien
     ok_clientes = save_file_to_github(
         f"data/campanhas/{campanha_id}_clientes.parquet",
         df_to_parquet_bytes(combined_df_clientes),
-        f"Campanha {nome_campanha}: clientes atualizados"
+        f"Campanha {nome_campanha}: dados de clientes atualizados"
     )
     if not ok_clientes:
-        return False, "Envios atualizados, mas erro ao atualizar clientes."
+        return False, "Erro ao atualizar clientes no GitHub."
 
     # Atualizar metadados
     df_meta = load_campanhas_meta()
@@ -467,124 +502,208 @@ def update_campanha_data(campanha_id, nome_campanha, new_df_envios, new_df_clien
         ok_meta = save_file_to_github(
             META_PATH,
             df_to_parquet_bytes(df_meta),
-            f"Meta: campanha {nome_campanha} atualizada"
+            f"Meta: campanha {nome_campanha} metadados atualizados"
         )
         if not ok_meta:
-            return False, "Arquivos atualizados, mas erro ao salvar metadados."
-    return True, None
+            return False, "Erro ao atualizar metadados da campanha."
+    else:
+        return False, "Metadados da campanha não encontrados para atualização."
 
+    return True, "Dados da campanha atualizados com sucesso!"
 
-def load_campanha_envios(campanha_id):
-    path = f"data/campanhas/{campanha_id}_envios.parquet"
-    content, _ = get_file_from_github(path)
-    return parquet_bytes_to_df(content)
+def delete_campanha(campanha_id, nome_campanha):
+    ok_envios = delete_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet", f"Campanha {nome_campanha}: envios deletados")
+    ok_clientes = delete_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet", f"Campanha {nome_campanha}: clientes deletados")
 
-def load_campanha_clientes(campanha_id):
-    path = f"data/campanhas/{campanha_id}_clientes.parquet"
-    content, _ = get_file_from_github(path)
-    return parquet_bytes_to_df(content)
+    if not ok_envios or not ok_clientes:
+        return False, "Erro ao deletar arquivos da campanha."
 
-def delete_campanha(campanha_id, nome):
     df_meta = load_campanhas_meta()
     df_meta = df_meta[df_meta['id'] != campanha_id]
-    save_file_to_github(META_PATH, df_to_parquet_bytes(df_meta), f"Meta: campanha {nome} removida")
-    delete_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet",   f"Campanha {nome}: envios removidos")
-    delete_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet", f"Campanha {nome}: clientes removidos")
+    ok_meta = save_file_to_github(META_PATH, df_to_parquet_bytes(df_meta), f"Meta: campanha {nome_campanha} deletada")
+
+    if not ok_meta:
+        return False, "Erro ao atualizar metadados após deletar campanha."
+    return True, "Campanha deletada com sucesso!"
 
 # ══════════════════════════════════════════════════════════════
-# FUNÇÕES AUXILIARES DE FORMATAÇÃO E GRÁFICOS
+# INTERFACE DO USUÁRIO
 # ══════════════════════════════════════════════════════════════
 
-def fmt_brl(valor):
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-def add_bar_labels(fig, formato='valor'):
-    for trace in fig.data:
-        if hasattr(trace, 'y') and trace.y is not None:
-            if formato == 'valor':
-                texts = [fmt_brl(v) if v is not None else '' for v in trace.y]
-            else:
-                texts = [str(int(v)) if v is not None else '' for v in trace.y]
-            trace.text = texts
-            trace.textposition = 'outside'
-            trace.textfont = dict(size=11)
-    fig.update_layout(uniformtext_minsize=8, uniformtext_mode='hide')
-    return fig
-
-# ══════════════════════════════════════════════════════════════
-# INTERFACE STREAMLIT
-# ══════════════════════════════════════════════════════════════
-
+# --- Login ---
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 
 if not st.session_state["logged_in"]:
     login_screen()
 else:
-    st.sidebar.title(f"Bem-vindo, {st.session_state['username']}!")
+    st.sidebar.write(f"Bem-vindo, {st.session_state['username']}!")
     if st.sidebar.button("Sair"):
         st.session_state["logged_in"] = False
-        st.session_state["username"]  = ""
-        st.session_state["role"]      = ""
         st.rerun()
 
-    st.sidebar.header("⚙️ Configurações")
+    # --- Gerenciamento de Campanhas (Apenas para Admin) ---
+    if is_admin():
+        st.sidebar.header("🛠️ Gerenciar Campanhas")
+        gerenciar_tab = st.sidebar.radio("Ações", ["Criar Nova", "Atualizar Existente", "Deletar"], key="gerenciar_campanha_radio")
 
-    # Carregar metadados das campanhas
-    df_meta_campanhas = load_campanhas_meta()
-    campanhas_disponiveis = df_meta_campanhas.to_dict('records')
-    campanha_nomes = {c['nome']: c['id'] for c in campanhas_disponiveis}
+        if gerenciar_tab == "Criar Nova":
+            with st.sidebar.expander("➕ Criar Nova Campanha"):
+                nome_nova_campanha = st.text_input("Nome da Nova Campanha", key="nome_nova_campanha_input")
+                uploaded_envios_new = st.file_uploader("Upload Base de Envios (.xlsx)", type=["xlsx"], key="upload_envios_new")
+                uploaded_clientes_new = st.file_uploader("Upload Base de Clientes (.xlsx)", type=["xlsx"], key="upload_clientes_new")
 
-    # Seleção de campanhas para análise
-    st.sidebar.subheader("Análise de Campanhas")
-    campanhas_selecionadas_nomes = st.sidebar.multiselect(
-        "Selecione as campanhas para análise:",
-        options=list(campanha_nomes.keys()),
-        key="multiselect_campanhas"
+                if st.button("Criar Campanha", key="criar_campanha_btn"):
+                    if nome_nova_campanha and uploaded_envios_new and uploaded_clientes_new:
+                        df_envios_new = load_and_process_envios(uploaded_envios_new)
+                        df_clientes_new = load_and_process_clientes(uploaded_clientes_new)
+
+                        if df_envios_new is not None and df_clientes_new is not None:
+                            with st.spinner("Criando campanha..."):
+                                campanha_id, msg = save_campanha(nome_nova_campanha, df_envios_new, df_clientes_new)
+                                if campanha_id:
+                                    st.success(msg)
+                                    st.cache_data.clear() # Limpa o cache para recarregar a meta
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        else:
+                            st.error("Por favor, corrija os erros nos arquivos de upload.")
+                    else:
+                        st.warning("Preencha todos os campos para criar uma nova campanha.")
+
+        elif gerenciar_tab == "Atualizar Existente":
+            with st.sidebar.expander("🔄 Atualizar Campanha Existente"):
+                df_meta_atualizar = load_campanhas_meta()
+                campanhas_disponiveis_atualizar = df_meta_atualizar['nome'].tolist()
+                campanha_selecionada_nome_atualizar = st.selectbox(
+                    "Selecione a Campanha para Atualizar",
+                    options=[""] + campanhas_disponiveis_atualizar,
+                    key="select_campanha_atualizar"
+                )
+
+                if campanha_selecionada_nome_atualizar:
+                    campanha_id_atualizar = df_meta_atualizar[df_meta_atualizar['nome'] == campanha_selecionada_nome_atualizar]['id'].iloc[0]
+                    st.info(f"Adicionando dados à campanha: **{campanha_selecionada_nome_atualizar}** (ID: {campanha_id_atualizar})")
+
+                    uploaded_envios_update = st.file_uploader("Upload Novos Envios (.xlsx)", type=["xlsx"], key="upload_envios_update")
+                    uploaded_clientes_update = st.file_uploader("Upload Novos Clientes (.xlsx)", type=["xlsx"], key="upload_clientes_update")
+
+                    if st.button("Adicionar Dados à Campanha", key="update_campanha_btn"):
+                        if uploaded_envios_update and uploaded_clientes_update:
+                            df_envios_update = load_and_process_envios(uploaded_envios_update)
+                            df_clientes_update = load_and_process_clientes(uploaded_clientes_update)
+
+                            if df_envios_update is not None and df_clientes_update is not None:
+                                with st.spinner("Atualizando campanha..."):
+                                    success, msg = update_campanha_data(campanha_id_atualizar, campanha_selecionada_nome_atualizar, df_envios_update, df_clientes_update)
+                                    if success:
+                                        st.success(msg)
+                                        st.cache_data.clear() # Limpa o cache para recarregar a meta e os dados
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            else:
+                                st.error("Por favor, corrija os erros nos arquivos de upload.")
+                        else:
+                            st.warning("Faça o upload dos novos arquivos de envios e clientes.")
+                else:
+                    st.info("Selecione uma campanha para adicionar dados.")
+
+        elif gerenciar_tab == "Deletar":
+            with st.sidebar.expander("🗑️ Deletar Campanha"):
+                df_meta_deletar = load_campanhas_meta()
+                campanhas_disponiveis_deletar = df_meta_deletar['nome'].tolist()
+                campanha_selecionada_nome_deletar = st.selectbox(
+                    "Selecione a Campanha para Deletar",
+                    options=[""] + campanhas_disponiveis_deletar,
+                    key="select_campanha_deletar"
+                )
+                if campanha_selecionada_nome_deletar:
+                    campanha_id_deletar = df_meta_deletar[df_meta_deletar['nome'] == campanha_selecionada_nome_deletar]['id'].iloc[0]
+                    st.warning(f"Você está prestes a deletar a campanha: **{campanha_selecionada_nome_deletar}** (ID: {campanha_id_deletar}). Esta ação é irreversível.")
+                    if st.button("Confirmar Deleção", key="deletar_campanha_btn"):
+                        with st.spinner("Deletando campanha..."):
+                            success, msg = delete_campanha(campanha_id_deletar, campanha_selecionada_nome_deletar)
+                            if success:
+                                st.success(msg)
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                else:
+                    st.info("Selecione uma campanha para deletar.")
+
+    # --- Seleção de Campanhas para Análise ---
+    st.sidebar.header("⚙️ Configurações da Análise")
+    df_meta = load_campanhas_meta()
+    campanhas_disponiveis = df_meta['nome'].tolist()
+
+    # Adicionar opção para selecionar por mês
+    df_meta['mes_ano'] = df_meta['criado_em'].dt.to_period('M').astype(str)
+    meses_disponiveis = sorted(df_meta['mes_ano'].unique().tolist(), reverse=True)
+    meses_disponiveis.insert(0, "Todas as Campanhas")
+
+    modo_selecao = st.sidebar.radio(
+        "Modo de Seleção de Campanhas",
+        ["Por Mês", "Individual (Múltipla Seleção)"],
+        key="modo_selecao_campanhas"
     )
-    campanhas_selecionadas_ids = [campanha_nomes[nome] for nome in campanhas_selecionadas_nomes]
+
+    campanhas_selecionadas_ids = []
+
+    if modo_selecao == "Por Mês":
+        mes_selecionado = st.sidebar.selectbox(
+            "Selecione o Mês/Ano",
+            options=meses_disponiveis,
+            key="mes_selecionado"
+        )
+        if mes_selecionado == "Todas as Campanhas":
+            campanhas_selecionadas_ids = df_meta['id'].tolist()
+        elif mes_selecionado:
+            campanhas_selecionadas_ids = df_meta[df_meta['mes_ano'] == mes_selecionado]['id'].tolist()
+    else: # Individual (Múltipla Seleção)
+        campanhas_selecionadas_nomes = st.sidebar.multiselect(
+            "Selecione as Campanhas",
+            options=campanhas_disponiveis,
+            default=campanhas_disponiveis if len(campanhas_disponiveis) <= 3 else [], # Seleciona todas se <=3, senão nenhuma
+            key="campanhas_multiselect"
+        )
+        campanhas_selecionadas_ids = df_meta[df_meta['nome'].isin(campanhas_selecionadas_nomes)]['id'].tolist()
 
     janela_dias = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7, key="janela_dias_slider")
     executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True, key="executar_analise_btn")
 
-    df_envios_agregado   = pd.DataFrame()
+    # --- Carregamento e Agregação de Dados ---
+    df_envios_agregado = pd.DataFrame()
     df_clientes_agregado = pd.DataFrame()
-    df_pagamentos        = pd.DataFrame()
+    df_pagamentos = load_pagamentos_geral()
 
     if campanhas_selecionadas_ids:
-        with st.spinner("Carregando dados das campanhas selecionadas..."):
-            lista_df_envios = []
-            lista_df_clientes = []
+        lista_df_envios = []
+        lista_df_clientes = []
+        with st.sidebar.spinner("Carregando dados das campanhas selecionadas..."):
             for c_id in campanhas_selecionadas_ids:
-                df_envios_temp = load_campanha_envios(c_id)
-                if not df_envios_temp.empty:
-                    lista_df_envios.append(df_envios_temp)
-                df_cli_temp = load_campanha_clientes(c_id)
-                if not df_cli_temp.empty:
-                    lista_df_clientes.append(df_cli_temp)
+                df_e = load_campanha_envios(c_id)
+                df_c = load_campanha_clientes(c_id)
+                if not df_e.empty:
+                    lista_df_envios.append(df_e)
+                if not df_c.empty:
+                    lista_df_clientes.append(df_c)
 
-            if lista_df_envios:
-                df_envios_agregado = pd.concat(lista_df_envios, ignore_index=True)
-                df_envios_agregado.drop_duplicates(subset=['TELEFONE_ENVIO', 'DATA_ENVIO'], inplace=True)
-                st.sidebar.success(f"✅ Envios agregados ({len(df_envios_agregado):,} registros únicos)")
-            else:
-                st.sidebar.error("Erro ao carregar envios das campanhas selecionadas ou bases vazias.")
+        if lista_df_envios:
+            df_envios_agregado = pd.concat(lista_df_envios, ignore_index=True)
+            df_envios_agregado.drop_duplicates(subset=['TELEFONE_ENVIO', 'DATA_ENVIO'], inplace=True)
+            st.sidebar.success(f"✅ Envios agregados ({len(df_envios_agregado):,} registros)")
+        else:
+            st.sidebar.error("Erro ao carregar envios das campanhas selecionadas.")
 
-            if lista_df_clientes:
-                df_clientes_agregado = pd.concat(lista_df_clientes, ignore_index=True)
-                df_clientes_agregado.drop_duplicates(subset=['TELEFONE_CLIENTE', 'MATRICULA_CLIENTE'], inplace=True)
-                st.sidebar.success(f"✅ Clientes agregados ({len(df_clientes_agregado):,} registros únicos)")
-            else:
-                st.sidebar.error("Erro ao carregar clientes das campanhas selecionadas ou bases vazias.")
-
-        # Carregar base de pagamentos (global, não por campanha)
-        with st.spinner("Carregando base de pagamentos..."):
-            content_pagamentos, _ = get_file_from_github(PAG_PATH)
-            df_pagamentos = parquet_bytes_to_df(content_pagamentos)
-            if not df_pagamentos.empty:
-                st.sidebar.success(f"✅ Base de pagamentos carregada ({len(df_pagamentos):,} registros)")
-            else:
-                st.sidebar.warning("Base de pagamentos não disponível ou vazia.")
+        if lista_df_clientes:
+            df_clientes_agregado = pd.concat(lista_df_clientes, ignore_index=True)
+            df_clientes_agregado.drop_duplicates(subset=['TELEFONE_CLIENTE', 'MATRICULA_CLIENTE'], inplace=True)
+            st.sidebar.success(f"✅ Clientes agregados ({len(df_clientes_agregado):,} registros)")
+        else:
+            st.sidebar.error("Erro ao carregar clientes das campanhas selecionadas.")
     else:
         st.sidebar.info("Nenhuma campanha selecionada para análise.")
 
@@ -594,118 +713,14 @@ else:
         not df_pagamentos.empty
     )
 
-    # ══════════════════════════════════════════════════════════════
-    # GERENCIAMENTO DE CAMPANHAS (APENAS PARA ADMIN)
-    # ══════════════════════════════════════════════════════════════
-    if is_admin():
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("🛠️ Gerenciar Campanhas")
-
-        gerenciar_tab = st.sidebar.radio(
-            "Ações de Gerenciamento:",
-            ["Criar Nova Campanha", "Adicionar Dados a Campanha Existente", "Remover Campanha"],
-            key="gerenciar_tab_radio"
-        )
-
-        if gerenciar_tab == "Criar Nova Campanha":
-            st.sidebar.markdown("##### Criar Nova Campanha")
-            nome_nova_campanha = st.sidebar.text_input("Nome da nova campanha", key="nome_nova_campanha_input")
-            uploaded_envios_nova = st.sidebar.file_uploader("Upload Envios (Nova Campanha)", type=["xlsx"], key="upload_envios_nova")
-            uploaded_clientes_nova = st.sidebar.file_uploader("Upload Clientes (Nova Campanha)", type=["xlsx"], key="upload_clientes_nova")
-
-            if st.sidebar.button("Salvar Nova Campanha", key="salvar_nova_campanha_btn"):
-                if nome_nova_campanha and uploaded_envios_nova and uploaded_clientes_nova:
-                    with st.spinner("Processando e salvando nova campanha..."):
-                        df_envios_proc = load_and_process_envios(uploaded_envios_nova)
-                        df_clientes_proc = load_and_process_clientes(uploaded_clientes_nova)
-
-                        if df_envios_proc is not None and df_clientes_proc is not None:
-                            camp_id, error = save_campanha(nome_nova_campanha, df_envios_proc, df_clientes_proc)
-                            if camp_id:
-                                st.sidebar.success(f"Campanha '{nome_nova_campanha}' criada com sucesso! ID: {camp_id}")
-                                st.cache_data.clear() # Limpa cache para recarregar metadados
-                                st.rerun()
-                            else:
-                                st.sidebar.error(f"Falha ao criar campanha: {error}")
-                        else:
-                            st.sidebar.error("Erro no processamento dos arquivos para a nova campanha.")
-                else:
-                    st.sidebar.warning("Preencha o nome e faça upload de ambos os arquivos para criar a campanha.")
-
-        elif gerenciar_tab == "Adicionar Dados a Campanha Existente":
-            st.sidebar.markdown("##### Adicionar Dados a Campanha Existente")
-            if not campanhas_disponiveis:
-                st.sidebar.info("Nenhuma campanha existente para adicionar dados.")
-            else:
-                campanha_para_atualizar_nome = st.sidebar.selectbox(
-                    "Selecione a campanha para adicionar dados:",
-                    options=[c['nome'] for c in campanhas_disponiveis],
-                    key="select_campanha_add_data"
-                )
-                campanha_para_atualizar_id = next((c['id'] for c in campanhas_disponiveis if c['nome'] == campanha_para_atualizar_nome), None)
-
-                uploaded_envios_add = st.sidebar.file_uploader("Upload Envios (Adicionar)", type=["xlsx"], key="upload_envios_add")
-                uploaded_clientes_add = st.sidebar.file_uploader("Upload Clientes (Adicionar)", type=["xlsx"], key="upload_clientes_add")
-
-                if st.sidebar.button("Adicionar Dados à Campanha", key="add_data_campanha_btn"):
-                    if campanha_para_atualizar_id and uploaded_envios_add and uploaded_clientes_add:
-                        with st.spinner(f"Adicionando dados à campanha '{campanha_para_atualizar_nome}'..."):
-                            new_df_envios_proc = load_and_process_envios(uploaded_envios_add)
-                            new_df_clientes_proc = load_and_process_clientes(uploaded_clientes_add)
-
-                            if new_df_envios_proc is not None and new_df_clientes_proc is not None:
-                                success, error = update_campanha_data(
-                                    campanha_para_atualizar_id,
-                                    campanha_para_atualizar_nome,
-                                    new_df_envios_proc,
-                                    new_df_clientes_proc
-                                )
-                                if success:
-                                    st.sidebar.success(f"Dados adicionados e campanha '{campanha_para_atualizar_nome}' atualizada com sucesso!")
-                                    st.cache_data.clear() # Limpa cache para recarregar metadados e dados
-                                    st.rerun()
-                                else:
-                                    st.sidebar.error(f"Falha ao adicionar dados: {error}")
-                            else:
-                                st.sidebar.error("Erro no processamento dos arquivos para adicionar dados.")
-                    else:
-                        st.sidebar.warning("Selecione uma campanha e faça upload de ambos os arquivos para adicionar dados.")
-
-
-        elif gerenciar_tab == "Remover Campanha":
-            st.sidebar.markdown("##### Remover Campanha")
-            if not campanhas_disponiveis:
-                st.sidebar.info("Nenhuma campanha para remover.")
-            else:
-                campanha_para_remover_nome = st.sidebar.selectbox(
-                    "Selecione a campanha para remover:",
-                    options=[c['nome'] for c in campanhas_disponiveis],
-                    key="select_campanha_remover"
-                )
-                campanha_para_remover_id = next((c['id'] for c in campanhas_disponiveis if c['nome'] == campanha_para_remover_nome), None)
-
-                if st.sidebar.button("Remover Campanha", key="remover_campanha_btn"):
-                    if campanha_para_remover_id:
-                        if st.sidebar.checkbox(f"Confirmar remoção da campanha '{campanha_para_remover_nome}'?", key="confirm_delete"):
-                            with st.spinner(f"Removendo campanha '{campanha_para_remover_nome}'..."):
-                                delete_campanha(campanha_para_remover_id, campanha_para_remover_nome)
-                                st.sidebar.success(f"Campanha '{campanha_para_remover_nome}' removida com sucesso!")
-                                st.cache_data.clear() # Limpa cache para recarregar metadados
-                                st.rerun()
-                        else:
-                            st.sidebar.warning("Confirme a remoção da campanha.")
-                    else:
-                        st.sidebar.warning("Selecione uma campanha para remover.")
-
-    # ══════════════════════════════════════════════════════════════
-    # ANÁLISE PRINCIPAL
-    # ══════════════════════════════════════════════════════════════
-
+    # --- Lógica Principal da Análise ---
     if executar_analise and dados_prontos:
-        # Total de clientes notificados (únicos em todas as campanhas selecionadas)
+        st.subheader("Resultados da Análise da Campanha")
+
+        # Total de clientes notificados (únicos no período agregado)
         total_clientes_notificados = df_envios_agregado['TELEFONE_ENVIO'].nunique()
 
-        # Total da dívida dos notificados (clientes únicos)
+        # Total da dívida dos notificados (apenas para clientes que foram notificados)
         df_telefones_unicos_envios = df_envios_agregado[['TELEFONE_ENVIO']].drop_duplicates()
         df_lookup_divida = pd.merge(
             df_telefones_unicos_envios,
@@ -729,15 +744,7 @@ else:
         df_campanha.rename(columns={'MATRICULA_CLIENTE': 'MATRICULA'}, inplace=True)
         df_campanha.drop(columns=['TELEFONE_CLIENTE'], inplace=True)
 
-        # Identificar clientes notificados múltiplas vezes
-        contagem_notificacoes = df_campanha.groupby('MATRICULA')['DATA_ENVIO'].nunique().reset_index()
-        contagem_notificacoes.rename(columns={'DATA_ENVIO': 'NUM_NOTIFICACOES'}, inplace=True)
-        clientes_multiplas_notificacoes = contagem_notificacoes[contagem_notificacoes['NUM_NOTIFICACOES'] > 1]
-
-        st.subheader("Visão Geral das Campanhas Selecionadas")
-        st.info(f"Clientes notificados múltiplas vezes: {len(clientes_multiplas_notificacoes)} de {total_clientes_notificados} clientes únicos.")
-
-        # Remover duplicatas de notificação para a análise de pagamento
+        # Garantir notificações únicas por matrícula e data de envio para evitar contagem duplicada
         df_campanha_unique_notifications = df_campanha.drop_duplicates(subset=['MATRICULA', 'DATA_ENVIO'])
 
         if not df_campanha_unique_notifications.empty:
@@ -769,15 +776,15 @@ else:
             taxa_eficiencia_clientes = (clientes_que_pagaram_matriculas / total_clientes_notificados * 100) if total_clientes_notificados > 0 else 0
             taxa_eficiencia_valor    = (valor_total_arrecadado / total_divida_notificados * 100) if total_divida_notificados > 0 else 0
             ticket_medio             = (valor_total_arrecadado / clientes_que_pagaram_matriculas) if clientes_que_pagaram_matriculas > 0 else 0
-            custo_campanha           = total_clientes_notificados * 0.05 # Custo hipotético
+            custo_campanha           = total_clientes_notificados * 0.05 # Exemplo de custo
             roi                      = ((valor_total_arrecadado - custo_campanha) / custo_campanha *100) if custo_campanha > 0 else 0
 
             # ── ABAS ──────────────────────────────────────────
             aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
                 "📊 Visão Geral",
-                "👥 Clientes Notificados Múltiplas Vezes", # Nova aba
                 "🏙️ Cidade e Diretoria",
                 "📅 Análise das Faturas",
+                "📈 Utilização",
                 "💳 Canal de Pagamento",
                 "📋 Detalhes"
             ])
@@ -786,11 +793,11 @@ else:
             # ABA 1 — VISÃO GERAL
             # ══════════════════════════════════════════════════
             with aba1:
-                st.subheader("Resultados da Análise das Campanhas Selecionadas")
+                st.subheader("Resultados da Análise da Campanha")
 
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Total de clientes notificados (únicos)", f"{total_clientes_notificados}")
+                    st.metric("Total de clientes notificados", f"{total_clientes_notificados}")
                 with col2:
                     st.metric("Clientes que pagaram na janela", f"{clientes_que_pagaram_matriculas}")
                 with col3:
@@ -798,7 +805,7 @@ else:
 
                 col4, col5, col6 = st.columns(3)
                 with col4:
-                    st.metric("Valor total arrecadado na janela", f"R$ {valor_total_arrecadado:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                    st.metric("Valor total arrecadado na campanha", f"R$ {valor_total_arrecadado:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 with col5:
                     st.metric("Total da dívida dos notificados", f"R$ {total_divida_notificados:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 with col6:
@@ -825,6 +832,7 @@ else:
                         labels={'Dias Após Envio': 'Dias Após o Envio', 'Valor Total Pago': 'Valor Total Pago (R$)'},
                         hover_data={'Valor Total Pago': ':.2f'}
                     )
+                    fig_dias = add_bar_labels(fig_dias, 'valor')
                     fig_dias.update_layout(xaxis_title="Dias Após o Envio", yaxis_title="Valor Total Pago (R$)")
                     st.plotly_chart(fig_dias, use_container_width=True, key="fig_dias")
 
@@ -833,52 +841,23 @@ else:
                     tab_dias['Valor Total Pago'] = tab_dias['Valor Total Pago'].apply(fmt_brl)
                     st.dataframe(tab_dias, use_container_width=True, hide_index=True)
 
-                    if 'TIPO_PAGAMENTO' in df_pagamentos_campanha.columns:
-                        st.subheader("Valor Arrecadado por Canal de Pagamento")
+                    # Clientes notificados múltiplas vezes
+                    st.subheader("Clientes Notificados Múltiplas Vezes")
+                    notificacoes_por_cliente = df_campanha_unique_notifications.groupby('MATRICULA').size().reset_index(name='Num_Notificacoes')
+                    clientes_multiplas_notificacoes = notificacoes_por_cliente[notificacoes_por_cliente['Num_Notificacoes'] > 1]
 
-                        pagamentos_por_canal = df_pagamentos_campanha.groupby('TIPO_PAGAMENTO')['VALOR_PAGO'].sum().reset_index()
-                        pagamentos_por_canal = pagamentos_por_canal.sort_values('VALOR_PAGO', ascending=False)
+                    if not clientes_multiplas_notificacoes.empty:
+                        st.dataframe(clientes_multiplas_notificacoes.sort_values('Num_Notificacoes', ascending=False), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Nenhum cliente foi notificado múltiplas vezes nas campanhas selecionadas.")
 
-                        fig_canal = px.bar(
-                            pagamentos_por_canal,
-                            x='TIPO_PAGAMENTO', y='VALOR_PAGO',
-                            title='Valor Arrecadado por Canal de Pagamento',
-                            labels={'TIPO_PAGAMENTO': 'Canal de Pagamento', 'VALOR_PAGO': 'Valor Total Pago (R$)'},
-                            color='TIPO_PAGAMENTO',
-                            hover_data={'VALOR_PAGO': ':.2f'}
-                        )
-                        fig_canal.update_layout(xaxis_title="Canal de Pagamento", yaxis_title="Valor Total Pago (R$)", showlegend=False)
-                        st.plotly_chart(fig_canal, use_container_width=True, key="fig_canal_aba1")
-
-                        #Tabela canal aba1
-                        tab_canal_v1 = pagamentos_por_canal.copy()
-                        tab_canal_v1.columns = ['Canal de Pagamento', 'Valor Total Pago']
-                        tab_canal_v1['Valor Total Pago'] = tab_canal_v1['Valor Total Pago'].apply(fmt_brl)
-                        st.dataframe(tab_canal_v1, use_container_width=True, hide_index=True)
                 else:
                     st.info("Nenhum pagamento encontrado dentro da janela definida para a campanha.")
 
             # ══════════════════════════════════════════════════
-            # ABA 2 — CLIENTES NOTIFICADOS MÚLTIPLAS VEZES (NOVA ABA)
+            # ABA 2 — CIDADE E DIRETORIA
             # ══════════════════════════════════════════════════
             with aba2:
-                st.subheader("Clientes Notificados Múltiplas Vezes")
-                if not clientes_multiplas_notificacoes.empty:
-                    st.write(f"Total de clientes notificados mais de uma vez: {len(clientes_multiplas_notificacoes)}")
-                    st.dataframe(clientes_multiplas_notificacoes, use_container_width=True, hide_index=True)
-
-                    # Opcional: Mostrar detalhes de notificações para esses clientes
-                    st.markdown("---")
-                    st.subheader("Detalhes das Notificações Múltiplas")
-                    df_multi_notif_details = df_campanha[df_campanha['MATRICULA'].isin(clientes_multiplas_notificacoes['MATRICULA'])].sort_values(['MATRICULA', 'DATA_ENVIO'])
-                    st.dataframe(df_multi_notif_details[['MATRICULA', 'TELEFONE_ENVIO', 'DATA_ENVIO', 'CIDADE', 'DIRETORIA']], use_container_width=True, hide_index=True)
-                else:
-                    st.info("Nenhum cliente foi notificado múltiplas vezes nas campanhas selecionadas.")
-
-            # ══════════════════════════════════════════════════
-            # ABA 3 — CIDADE E DIRETORIA (antiga ABA 2)
-            # ══════════════════════════════════════════════════
-            with aba3:
                 if not df_pagamentos_campanha.empty:
                     tem_cidade    = 'CIDADE' in df_pagamentos_campanha.columns
                     tem_diretoria = 'DIRETORIA' in df_pagamentos_campanha.columns
@@ -898,6 +877,7 @@ else:
                             labels={'CIDADE': 'Cidade', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
                             hover_data={'Valor_Arrecadado': ':.2f'}
                         )
+                        fig_cidade_valor = add_bar_labels(fig_cidade_valor, 'valor')
                         fig_cidade_valor.update_layout(xaxis_title="Cidade", yaxis_title="Valor Arrecadado (R$)")
                         st.plotly_chart(fig_cidade_valor, use_container_width=True, key="fig_cidade_valor")
 
@@ -907,6 +887,7 @@ else:
                             title='Clientes que Pagaram por Cidade',
                             labels={'CIDADE': 'Cidade', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
                         )
+                        fig_cidade_clientes = add_bar_labels(fig_cidade_clientes, 'qtd')
                         fig_cidade_clientes.update_layout(xaxis_title="Cidade", yaxis_title="Clientes que Pagaram")
                         st.plotly_chart(fig_cidade_clientes, use_container_width=True, key="fig_cidade_clientes")
 
@@ -924,17 +905,11 @@ else:
                                 x='CIDADE', y='VALOR_PAGO', color='TIPO_PAGAMENTO',
                                 title='Valor Pago por Cidade e Canal de Pagamento',
                                 labels={'CIDADE': 'Cidade', 'VALOR_PAGO': 'Valor Pago (R$)', 'TIPO_PAGAMENTO': 'Canal'},
-                                barmode='stack'
+                                hover_data={'VALOR_PAGO': ':.2f'}
                             )
-                            fig_cidade_canal.update_layout(xaxis_title="Cidade", yaxis_title="Valor Pago (R$)")
+                            fig_cidade_canal = add_bar_labels(fig_cidade_canal, 'valor')
+                            fig_cidade_canal.update_layout(xaxis_title="Cidade", yaxis_title="Valor Pago (R$)", barmode='stack')
                             st.plotly_chart(fig_cidade_canal, use_container_width=True, key="fig_cidade_canal")
-
-                            # Tabela cidade x canal
-                            tab_cidade_canal = cidade_canal.copy()
-                            tab_cidade_canal.columns = ['Cidade', 'Canal de Pagamento', 'Valor Pago']
-                            tab_cidade_canal['Valor Pago'] = tab_cidade_canal['Valor Pago'].apply(fmt_brl)
-                            tab_cidade_canal = tab_cidade_canal.sort_values(['Cidade', 'Canal de Pagamento'])
-                            st.dataframe(tab_cidade_canal, use_container_width=True, hide_index=True)
 
                     if tem_diretoria:
                         st.subheader("Análise por Diretoria")
@@ -951,6 +926,7 @@ else:
                             labels={'DIRETORIA': 'Diretoria', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
                             hover_data={'Valor_Arrecadado': ':.2f'}
                         )
+                        fig_diretoria_valor = add_bar_labels(fig_diretoria_valor, 'valor')
                         fig_diretoria_valor.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Arrecadado (R$)")
                         st.plotly_chart(fig_diretoria_valor, use_container_width=True, key="fig_diretoria_valor")
 
@@ -960,6 +936,7 @@ else:
                             title='Clientes que Pagaram por Diretoria',
                             labels={'DIRETORIA': 'Diretoria', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
                         )
+                        fig_diretoria_clientes = add_bar_labels(fig_diretoria_clientes, 'qtd')
                         fig_diretoria_clientes.update_layout(xaxis_title="Diretoria", yaxis_title="Clientes que Pagaram")
                         st.plotly_chart(fig_diretoria_clientes, use_container_width=True, key="fig_diretoria_clientes")
 
@@ -977,17 +954,11 @@ else:
                                 x='DIRETORIA', y='VALOR_PAGO', color='TIPO_PAGAMENTO',
                                 title='Valor Pago por Diretoria e Canal de Pagamento',
                                 labels={'DIRETORIA': 'Diretoria', 'VALOR_PAGO': 'Valor Pago (R$)', 'TIPO_PAGAMENTO': 'Canal'},
-                                barmode='stack'
+                                hover_data={'VALOR_PAGO': ':.2f'}
                             )
-                            fig_diretoria_canal.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Pago (R$)")
+                            fig_diretoria_canal = add_bar_labels(fig_diretoria_canal, 'valor')
+                            fig_diretoria_canal.update_layout(xaxis_title="Diretoria", yaxis_title="Valor Pago (R$)", barmode='stack')
                             st.plotly_chart(fig_diretoria_canal, use_container_width=True, key="fig_diretoria_canal")
-
-                            # Tabela diretoria x canal
-                            tab_diretoria_canal = diretoria_canal.copy()
-                            tab_diretoria_canal.columns = ['Diretoria', 'Canal de Pagamento', 'Valor Pago']
-                            tab_diretoria_canal['Valor Pago'] = tab_diretoria_canal['Valor Pago'].apply(fmt_brl)
-                            tab_diretoria_canal = tab_diretoria_canal.sort_values(['Diretoria', 'Canal de Pagamento'])
-                            st.dataframe(tab_diretoria_canal, use_container_width=True, hide_index=True)
 
                     if not tem_cidade and not tem_diretoria:
                         st.info("As colunas 'CIDADE' e 'DIRETORIA' não foram encontradas nos dados de clientes.")
@@ -995,35 +966,53 @@ else:
                     st.info("Nenhum pagamento encontrado dentro da janela definida para a campanha.")
 
             # ══════════════════════════════════════════════════
-            # ABA 4 — ANÁLISE DAS FATURAS (antiga ABA 3)
+            # ABA 3 — ANÁLISE DAS FATURAS
             # ══════════════════════════════════════════════════
-            with aba4:
+            with aba3:
                 if not df_pagamentos_campanha.empty:
-                    if 'MES_ANO_FATURA' in df_pagamentos_campanha.columns:
-                        st.subheader("Valor Pago por Mês/Ano da Fatura")
+                    tem_vencimento = 'VENCIMENTO' in df_pagamentos_campanha.columns
+                    tem_tipo_fatura = 'TIPO_FATURA' in df_pagamentos_campanha.columns
 
-                        mes_ano_resumo = df_pagamentos_campanha.groupby('MES_ANO_FATURA')['VALOR_PAGO'].sum().reset_index()
-                        mes_ano_resumo['MES_ANO_ORDEM'] = pd.to_datetime(mes_ano_resumo['MES_ANO_FATURA'], format='%m/%Y')
-                        mes_ano_resumo = mes_ano_resumo.sort_values('MES_ANO_ORDEM').drop(columns='MES_ANO_ORDEM')
+                    if tem_vencimento:
+                        st.subheader("Análise por Mês/Ano de Vencimento da Fatura")
 
-                        fig_mes_ano = px.bar(
-                            mes_ano_resumo,
-                            x='MES_ANO_FATURA', y='VALOR_PAGO',
-                            title='Valor Pago por Mês/Ano da Fatura',
-                            labels={'MES_ANO_FATURA': 'Mês/Ano da Fatura', 'VALOR_PAGO': 'Valor Pago (R$)'},
-                            hover_data={'VALOR_PAGO': ':.2f'}
+                        fatura_resumo = df_pagamentos_campanha.groupby('MES_ANO_FATURA').agg(
+                            Clientes_que_Pagaram=('MATRICULA', 'nunique'),
+                            Valor_Arrecadado=('VALOR_PAGO', 'sum')
+                        ).reset_index()
+                        fatura_resumo['MES_ANO_FATURA'] = pd.to_datetime(fatura_resumo['MES_ANO_FATURA'], format='%m/%Y')
+                        fatura_resumo = fatura_resumo.sort_values('MES_ANO_FATURA')
+
+                        fig_fatura_valor = px.bar(
+                            fatura_resumo,
+                            x='MES_ANO_FATURA', y='Valor_Arrecadado',
+                            title='Valor Arrecadado por Mês/Ano de Vencimento',
+                            labels={'MES_ANO_FATURA': 'Mês/Ano de Vencimento', 'Valor_Arrecadado': 'Valor Arrecadado (R$)'},
+                            hover_data={'Valor_Arrecadado': ':.2f'}
                         )
-                        fig_mes_ano.update_layout(xaxis_title="Mês/Ano da Fatura", yaxis_title="Valor Pago (R$)")
-                        st.plotly_chart(fig_mes_ano, use_container_width=True, key="fig_mes_ano")
+                        fig_fatura_valor = add_bar_labels(fig_fatura_valor, 'valor')
+                        fig_fatura_valor.update_layout(xaxis_title="Mês/Ano de Vencimento", yaxis_title="Valor Arrecadado (R$)")
+                        st.plotly_chart(fig_fatura_valor, use_container_width=True, key="fig_fatura_valor")
 
-                        # Tabela mes/ano
-                        tab_mes_ano = mes_ano_resumo.copy()
-                        tab_mes_ano.columns = ['Mês/Ano da Fatura', 'Valor Pago']
-                        tab_mes_ano['Valor Pago'] = tab_mes_ano['Valor Pago'].apply(fmt_brl)
-                        st.dataframe(tab_mes_ano, use_container_width=True, hide_index=True)
+                        fig_fatura_clientes = px.bar(
+                            fatura_resumo,
+                            x='MES_ANO_FATURA', y='Clientes_que_Pagaram',
+                            title='Clientes que Pagaram por Mês/Ano de Vencimento',
+                            labels={'MES_ANO_FATURA': 'Mês/Ano de Vencimento', 'Clientes_que_Pagaram': 'Clientes que Pagaram'}
+                        )
+                        fig_fatura_clientes = add_bar_labels(fig_fatura_clientes, 'qtd')
+                        fig_fatura_clientes.update_layout(xaxis_title="Mês/Ano de Vencimento", yaxis_title="Clientes que Pagaram")
+                        st.plotly_chart(fig_fatura_clientes, use_container_width=True, key="fig_fatura_clientes")
 
-                    if 'TIPO_FATURA' in df_pagamentos_campanha.columns:
-                        st.subheader("Valor Pago por Tipo de Fatura")
+                        # Tabela fatura
+                        tab_fatura = fatura_resumo.copy()
+                        tab_fatura['MES_ANO_FATURA'] = tab_fatura['MES_ANO_FATURA'].dt.strftime('%m/%Y')
+                        tab_fatura.columns = ['Mês/Ano de Vencimento', 'Clientes que Pagaram', 'Valor Arrecadado']
+                        tab_fatura['Valor Arrecadado'] = tab_fatura['Valor Arrecadado'].apply(fmt_brl)
+                        st.dataframe(tab_fatura, use_container_width=True, hide_index=True)
+
+                    if tem_tipo_fatura:
+                        st.subheader("Análise por Tipo de Fatura")
 
                         tipo_fatura_resumo = df_pagamentos_campanha.groupby('TIPO_FATURA').agg(
                             Quantidade=('MATRICULA', 'count'),
@@ -1048,6 +1037,16 @@ else:
                         tab_tipo_fatura['Valor Pago'] = tab_tipo_fatura['Valor Pago'].apply(fmt_brl)
                         st.dataframe(tab_tipo_fatura, use_container_width=True, hide_index=True)
 
+                    if not tem_vencimento and not tem_tipo_fatura:
+                        st.info("As colunas 'VENCIMENTO' e 'TIPO_FATURA' não foram encontradas nos dados de pagamentos.")
+                else:
+                    st.info("Nenhum pagamento encontrado dentro da janela definida para a campanha.")
+
+            # ══════════════════════════════════════════════════
+            # ABA 4 — UTILIZAÇÃO
+            # ══════════════════════════════════════════════════
+            with aba4:
+                if not df_pagamentos_campanha.empty:
                     if 'UTILIZACAO' in df_pagamentos_campanha.columns:
                         st.subheader("Valor Pago por Utilização (Sub. Categoria)")
 
@@ -1073,7 +1072,8 @@ else:
                         tab_utilizacao.columns = ['Utilização', 'Quantidade', 'Valor Pago']
                         tab_utilizacao['Valor Pago'] = tab_utilizacao['Valor Pago'].apply(fmt_brl)
                         st.dataframe(tab_utilizacao, use_container_width=True, hide_index=True)
-
+                    else:
+                        st.info("A coluna 'UTILIZACAO' não foi encontrada nos dados de pagamentos.")
                 else:
                     st.info("Nenhum pagamento encontrado dentro da janela definida para a campanha.")
 
