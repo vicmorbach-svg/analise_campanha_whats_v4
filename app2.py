@@ -573,7 +573,7 @@ if is_admin():
             type=["csv", "xlsx", "parquet"],
             key="up_pag"
         )
-        if st.button("⬆️ Enviar para o GitHub"):
+        if st.button("⬆️ Enviar para o GitHub", key="enviar_para_git_btn"):
             if uploaded_pag is None:
                 st.error("Selecione um arquivo de pagamentos.")
             else:
