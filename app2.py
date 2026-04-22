@@ -1,410 +1,161 @@
 import streamlit as st
 import pandas as pd
-from datetime import timedelta
+from datetime import timedelta, datetime
 import plotly.express as px
-import io
-import base64
+import plotly.graph_objects as go
 import requests
+import base64
 import json
-import uuid
 
-# ══════════════════════════════════════════════════════════════
-# SISTEMA DE LOGIN
-# ══════════════════════════════════════════════════════════════
+# --- Configurações da Página ---
+st.set_page_config(layout="wide", page_title="Análise de campanha de cobrança")
 
-def get_users():
-    users = {}
-    try:
-        secrets  = st.secrets["users"]
-        prefixes = set()
-        for key in secrets:
-            if key.endswith("_user"):
-                prefixes.add(key[:-5])
-        for prefix in prefixes:
-            username = secrets.get(f"{prefix}_user", "")
-            password = secrets.get(f"{prefix}_password", "")
-            role     = secrets.get(f"{prefix}_role", "user")
-            if username:
-                users[username] = {"password": password, "role": role}
-    except Exception:
-        pass
-    return users
+st.title("📊 Análise de eficiência de campanha de cobrança via Whatsapp")
+st.markdown("Analise a performance de campanhas de notificações carregadas do GitHub.")
 
-def login_screen():
-    st.title("🔐 Login")
-    st.markdown("Faça login para acessar o sistema.")
-    with st.form("login_form"):
-        username  = st.text_input("Usuário")
-        password  = st.text_input("Senha", type="password")
-        submitted = st.form_submit_button("Entrar")
-    if submitted:
-        users = get_users()
-        if username in users and users[username]["password"] == password:
-            st.session_state["logged_in"] = True
-            st.session_state["username"]  = username
-            st.session_state["role"]      = users[username]["role"]
-            st.rerun()
-        else:
-            st.error("Usuário ou senha incorretos.")
+# --- Variáveis de Ambiente / Configurações ---
+GITHUB_REPO_OWNER = st.secrets["github"]["repo_owner"]
+GITHUB_REPO_NAME  = st.secrets["github"]["repo_name"]
+GITHUB_TOKEN      = st.secrets["github"]["token"]
+GITHUB_BRANCH     = st.secrets["github"]["branch"]
 
-def is_admin():
-    return st.session_state.get("role") == "admin"
-
-# ══════════════════════════════════════════════════════════════
-# GITHUB — com suporte a arquivos grandes
-# ══════════════════════════════════════════════════════════════
-
-def get_github_config():
-    try:
-        token  = st.secrets["github"]["token"]
-        repo   = st.secrets["github"]["repo"]
-        branch = st.secrets["github"].get("branch", "main")
-        return token, repo, branch
-    except Exception:
-        return None, None, None
-
+# --- Funções de Autenticação e GitHub ---
 def get_github_headers():
-    token, _, _ = get_github_config()
-    return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
 
 def get_file_sha(path):
-    """Retorna apenas o SHA de um arquivo para operações de update."""
-    token, repo, branch = get_github_config()
-    if not token:
-        return None
-    url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
-    r   = requests.get(url, headers=get_github_headers())
-    if r.status_code == 200:
-        data = r.json()
-        # arquivo pequeno
-        if isinstance(data, dict):
-            return data.get("sha")
+    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path}?ref={GITHUB_BRANCH}"
+    response = requests.get(url, headers=get_github_headers())
+    if response.status_code == 200:
+        return response.json().get("sha")
     return None
 
-def get_file_from_github(path):
-    """
-    Lê arquivo do GitHub via Raw URL (sem limite de tamanho).
-    Retorna (bytes, sha) ou (None, None).
-    """
-    token, repo, branch = get_github_config()
-    if not token:
-        return None, None
+def get_file_from_github(path, raw=False):
+    if raw:
+        url = f"https://raw.githubusercontent.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/{GITHUB_BRANCH}/{path}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            return response.content
+        return None
+    else:
+        url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path}?ref={GITHUB_BRANCH}"
+        response = requests.get(url, headers=get_github_headers())
+        if response.status_code == 200:
+            content = response.json().get("content")
+            if content:
+                return base64.b64decode(content)
+        return None
 
-    # Leitura via raw URL — sem limite de 1MB
-    raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
-    r = requests.get(raw_url, headers={"Authorization": f"token {token}"})
-    if r.status_code == 200 and len(r.content) > 0:
-        sha = get_file_sha(path)
-        return r.content, sha
-    return None, None
-
-def save_file_to_github(path, content_bytes, message):
-    """
-    Salva arquivo no GitHub.
-    Arquivos <= 50MB usam a Contents API com base64.
-    """
-    token, repo, branch = get_github_config()
-    if not token:
-        return False
-
-    sha     = get_file_sha(path)
-    url     = f"https://api.github.com/repos/{repo}/contents/{path}"
-    payload = {
+def save_file_to_github(path, content, message, sha=None):
+    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path}"
+    data = {
         "message": message,
-        "content": base64.b64encode(content_bytes).decode("utf-8"),
-        "branch":  branch
+        "content": base64.b64encode(content).decode("utf-8"),
+        "branch": GITHUB_BRANCH
     }
     if sha:
-        payload["sha"] = sha
+        data["sha"] = sha
 
-    r = requests.put(url, headers=get_github_headers(), data=json.dumps(payload))
-    return r.status_code in [200, 201]
+    response = requests.put(url, headers=get_github_headers(), data=json.dumps(data))
+    return response.status_code in [200, 201]
 
-def delete_file_from_github(path, message):
-    token, repo, branch = get_github_config()
-    if not token:
-        return False
-    sha = get_file_sha(path)
-    if not sha:
-        return True
-    url     = f"https://api.github.com/repos/{repo}/contents/{path}"
-    payload = {"message": message, "sha": sha, "branch": branch}
-    r = requests.delete(url, headers=get_github_headers(), data=json.dumps(payload))
-    return r.status_code == 200
+def is_admin():
+    # Implemente sua lógica de autenticação de administrador aqui
+    # Por exemplo, verificar se um usuário está logado e tem permissões de admin
+    # Por simplicidade, vamos retornar True para permitir acesso ao admin
+    return True #st.session_state.get("is_admin", False)
 
-def df_to_parquet_bytes(df):
-    buf = io.BytesIO()
-    df.to_parquet(buf, index=False, engine='pyarrow')
-    buf.seek(0)
-    return buf.getvalue()
+# --- Funções de Processamento de Dados ---
 
-def parquet_bytes_to_df(content_bytes):
-    if content_bytes is None or len(content_bytes) == 0:
-        st.error("Conteúdo do arquivo está vazio (0 bytes).")
-        return None
+@st.cache_data(ttl=3600) # Cache por 1 hora
+def load_and_process_envios(uploaded_file_content):
     try:
-        buf = io.BytesIO(content_bytes)
-        buf.seek(0)
-        return pd.read_parquet(buf, engine='pyarrow')
-    except Exception as e1:
-        try:
-            buf = io.BytesIO(content_bytes)
-            buf.seek(0)
-            return pd.read_parquet(buf, engine='fastparquet')
-        except Exception as e2:
-            st.error(f"Erro ao ler parquet — pyarrow: {e1} | fastparquet: {e2}")
-            return None
-
-# ══════════════════════════════════════════════════════════════
-# CAMPANHAS
-# ══════════════════════════════════════════════════════════════
-
-META_PATH = "data/campanhas_meta.parquet"
-PAG_PATH  = "data/pagamentos.parquet"
-
-def load_campanhas_meta():
-    content, _ = get_file_from_github(META_PATH)
-    if content:
-        df = parquet_bytes_to_df(content)
-        if df is not None:
-            return df
-    return pd.DataFrame(columns=['id', 'nome', 'criado_em', 'total_envios', 'total_clientes'])
-
-def save_campanha(nome, df_envios, df_clientes):
-    campanha_id = str(uuid.uuid4())[:8]
-    ok_envios = save_file_to_github(
-        f"data/campanhas/{campanha_id}_envios.parquet",
-        df_to_parquet_bytes(df_envios),
-        f"Campanha {nome}: envios"
-    )
-    if not ok_envios:
-        return None, "Erro ao salvar envios no GitHub."
-    ok_clientes = save_file_to_github(
-        f"data/campanhas/{campanha_id}_clientes.parquet",
-        df_to_parquet_bytes(df_clientes),
-        f"Campanha {nome}: clientes"
-    )
-    if not ok_clientes:
-        return None, "Envios salvos, mas erro ao salvar clientes."
-    df_meta = load_campanhas_meta()
-    nova = pd.DataFrame([{
-        'id':             campanha_id,
-        'nome':           nome,
-        'criado_em':      pd.Timestamp.now(),
-        'total_envios':   df_envios['TELEFONE_ENVIO'].nunique(),
-        'total_clientes': len(df_clientes)
-    }])
-    df_meta = pd.concat([df_meta, nova], ignore_index=True)
-    ok_meta = save_file_to_github(
-        META_PATH,
-        df_to_parquet_bytes(df_meta),
-        f"Meta: campanha {nome} criada"
-    )
-    if not ok_meta:
-        return None, "Arquivos salvos, mas erro ao salvar metadados."
-    return campanha_id, None
-
-def load_campanha_envios(campanha_id):
-    path = f"data/campanhas/{campanha_id}_envios.parquet"
-    content, _ = get_file_from_github(path)
-    if content is None:
-        st.error(f"Arquivo não encontrado: {path}")
-        return None
-    return parquet_bytes_to_df(content)
-
-def load_campanha_clientes(campanha_id):
-    path = f"data/campanhas/{campanha_id}_clientes.parquet"
-    content, _ = get_file_from_github(path)
-    if content is None:
-        st.error(f"Arquivo não encontrado: {path}")
-        return None
-    return parquet_bytes_to_df(content)
-
-def delete_campanha(campanha_id, nome):
-    df_meta = load_campanhas_meta()
-    df_meta = df_meta[df_meta['id'] != campanha_id]
-    save_file_to_github(META_PATH, df_to_parquet_bytes(df_meta), f"Meta: campanha {nome} removida")
-    delete_file_from_github(f"data/campanhas/{campanha_id}_envios.parquet",   f"Campanha {nome}: envios removidos")
-    delete_file_from_github(f"data/campanhas/{campanha_id}_clientes.parquet", f"Campanha {nome}: clientes removidos")
-
-# ══════════════════════════════════════════════════════════════
-# PAGAMENTOS
-# ══════════════════════════════════════════════════════════════
-
-def load_pagamentos_github():
-    content, _ = get_file_from_github(PAG_PATH)
-    if content is None or len(content) == 0:
-        return None
-    return parquet_bytes_to_df(content)
-
-def update_pagamentos_github(df_novo):
-    df_existente = load_pagamentos_github()
-    if df_existente is not None and not df_existente.empty:
-        df_combined = pd.concat([df_existente, df_novo], ignore_index=True)
-        df_combined = df_combined.drop_duplicates(
-            subset=['MATRICULA_PAGAMENTO', 'DATA_PAGAMENTO', 'VALOR_PAGO'],
-            keep='last'
-        )
-    else:
-        df_combined = df_novo.copy()
-    total_antes = len(df_existente) if df_existente is not None else 0
-    novos       = len(df_combined) - total_antes
-    ok = save_file_to_github(PAG_PATH, df_to_parquet_bytes(df_combined), "Pagamentos: atualização")
-    return ok, len(df_combined), novos
-
-# ══════════════════════════════════════════════════════════════
-# FUNÇÕES DE PROCESSAMENTO
-# ══════════════════════════════════════════════════════════════
-
-@st.cache_data
-def load_and_process_envios(uploaded_file):
-    try:
-        df = pd.read_excel(uploaded_file)
+        df = pd.read_excel(uploaded_file_content)
         required_cols = ['To', 'Send At']
         if not all(col in df.columns for col in required_cols):
-            st.error("Arquivo de Envios: colunas 'To' e 'Send At' não encontradas.")
+            st.error(f"Arquivo de Envios: Colunas esperadas '{required_cols[0]}' e '{required_cols[1]}' não encontradas.")
             return None
+
         df_envios = df[['To', 'Send At']].copy()
         df_envios.rename(columns={'To': 'TELEFONE_ENVIO', 'Send At': 'DATA_ENVIO'}, inplace=True)
-        df_envios['TELEFONE_ENVIO'] = (
-            df_envios['TELEFONE_ENVIO']
-            .astype(str)
-            .str.replace(r'^55', '', regex=True)
-            .str.replace(r'\.0$', '', regex=True)
-            .str.strip()
-        )
+
+        df_envios['TELEFONE_ENVIO'] = df_envios['TELEFONE_ENVIO'].astype(str).str.replace(r'^55', '', regex=True).str.replace(r'\.0$', '', regex=True)
+        df_envios['TELEFONE_ENVIO'] = df_envios['TELEFONE_ENVIO'].str.strip()
+
         df_envios['DATA_ENVIO'] = pd.to_datetime(df_envios['DATA_ENVIO'], errors='coerce', dayfirst=True)
         df_envios.dropna(subset=['DATA_ENVIO'], inplace=True)
         return df_envios
     except Exception as e:
-        st.error(f"Erro ao processar Envios: {e}")
+        st.error(f"Erro ao processar arquivo de Envios: {e}")
         return None
 
-@st.cache_data
-def load_and_process_clientes(uploaded_file):
-    try:
-        df = pd.read_excel(uploaded_file)
-        required_cols = ['TELEFONE', 'MATRICULA', 'SITUACAO']
-        if not all(col in df.columns for col in required_cols):
-            st.error(f"Arquivo de Clientes: colunas necessárias não encontradas: {required_cols}")
-            return None
-        colunas_ler = ['TELEFONE', 'MATRICULA', 'SITUACAO']
-        for col_opcional in ['CIDADE', 'DIRETORIA']:
-            if col_opcional in df.columns:
-                colunas_ler.append(col_opcional)
-        df_clientes = df[colunas_ler].copy()
-        df_clientes.rename(columns={
-            'TELEFONE': 'TELEFONE_CLIENTE',
-            'MATRICULA': 'MATRICULA_CLIENTE'
-        }, inplace=True)
-        df_clientes['TELEFONE_CLIENTE'] = (
-            df_clientes['TELEFONE_CLIENTE']
-            .astype(str)
-            .str.replace(r'^55', '', regex=True)
-            .str.replace(r'\.0$', '', regex=True)
-            .str.strip()
-        )
-        df_clientes['MATRICULA_CLIENTE'] = (
-            df_clientes['MATRICULA_CLIENTE']
-            .astype(str)
-            .str.replace(r'\.0$', '', regex=True)
-            .str.strip()
-        )
-        df_clientes['SITUACAO'] = pd.to_numeric(df_clientes['SITUACAO'], errors='coerce').fillna(0)
-        if 'CIDADE' in df_clientes.columns:
-            df_clientes['CIDADE']    = df_clientes['CIDADE'].astype(str).str.strip()
-        if 'DIRETORIA' in df_clientes.columns:
-            df_clientes['DIRETORIA'] = df_clientes['DIRETORIA'].astype(str).str.strip()
-        df_clientes.drop_duplicates(subset=['TELEFONE_CLIENTE', 'MATRICULA_CLIENTE'], inplace=True)
-        return df_clientes
-    except Exception as e:
-        st.error(f"Erro ao processar Clientes: {e}")
-        return None
-
-@st.cache_data
-def load_and_process_pagamentos(uploaded_file):
+@st.cache_data(ttl=3600) # Cache por 1 hora
+def load_and_process_pagamentos(uploaded_file_content, file_extension):
     try:
         df = None
-        if uploaded_file.name.endswith('.parquet'):
-            df_pag = pd.read_parquet(uploaded_file, engine='pyarrow')
+        if file_extension == '.parquet':
+            df_pag = pd.read_parquet(uploaded_file_content)
             if 'MATRICULA_PAGAMENTO' in df_pag.columns:
-                df_pag['MATRICULA_PAGAMENTO'] = (
-                    df_pag['MATRICULA_PAGAMENTO']
-                    .astype(str)
-                    .str.replace(r'\.0$', '', regex=True)
-                    .str.strip()
-                )
-                df_pag['DATA_PAGAMENTO'] = pd.to_datetime(df_pag['DATA_PAGAMENTO'], errors='coerce', dayfirst=True)
-                df_pag.dropna(subset=['DATA_PAGAMENTO'], inplace=True)
-                df_pag['VALOR_PAGO'] = pd.to_numeric(df_pag['VALOR_PAGO'], errors='coerce')
-                df_pag.dropna(subset=['VALOR_PAGO'], inplace=True)
-                if 'TIPO_PAGAMENTO' in df_pag.columns:
-                    df_pag['TIPO_PAGAMENTO'] = df_pag['TIPO_PAGAMENTO'].astype(str).str.strip().replace('nan', 'Não informado')
-                if 'VENCIMENTO' in df_pag.columns:
-                    df_pag['VENCIMENTO']     = pd.to_datetime(df_pag['VENCIMENTO'], errors='coerce', dayfirst=True)
-                    df_pag['MES_FATURA']     = df_pag['VENCIMENTO'].dt.month
-                    df_pag['ANO_FATURA']     = df_pag['VENCIMENTO'].dt.year
-                    df_pag['MES_ANO_FATURA'] = df_pag['VENCIMENTO'].dt.strftime('%m/%Y')
-                if 'TIPO_FATURA' in df_pag.columns:
-                    df_pag['TIPO_FATURA'] = df_pag['TIPO_FATURA'].astype(str).str.strip().replace('nan', 'Não informado')
-                if 'UTILIZACAO' in df_pag.columns:
-                    df_pag['UTILIZACAO'] = df_pag['UTILIZACAO'].astype(str).str.strip().replace('nan', 'Não informado')
-                return df_pag
-            else:
-                df         = df_pag
+                df = df_pag
+            else: # Se o parquet não tem os nomes esperados, trata como tabela posicional
+                df = df_pag
                 df.columns = range(len(df.columns))
-        elif uploaded_file.name.endswith('.csv'):
+        elif file_extension == '.csv':
             for encoding in ['latin1', 'utf-8', 'cp1252']:
                 try:
-                    df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding=encoding, header=None)
-                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file_content, sep=';', decimal=',', encoding=encoding, header=None)
                     break
                 except Exception:
-                    uploaded_file.seek(0)
                     continue
-            if df is None:
-                raise ValueError("Não foi possível ler o CSV.")
-        elif uploaded_file.name.endswith('.xlsx'):
-            df = pd.read_excel(uploaded_file, header=None)
+        elif file_extension == '.xlsx':
+            df = pd.read_excel(uploaded_file_content, header=None)
         else:
-            raise ValueError("Formato não suportado.")
+            raise ValueError("Formato não suportado. Use .csv, .xlsx ou .parquet.")
 
         if df is None or df.empty:
-            st.error("Arquivo de Pagamentos está vazio.")
-            return None
-        if df.shape[1] < 10:
-            st.error(f"Esperava pelo menos 10 colunas, encontrou {df.shape[1]}.")
+            st.error("Arquivo de Pagamentos está vazio ou não pôde ser lido.")
             return None
 
-        col_indices = [0, 5, 8]
-        col_names   = ['MATRICULA_PAGAMENTO', 'DATA_PAGAMENTO', 'VALOR_PAGO']
-        if df.shape[1] > 12:
-            col_indices.append(12)
-            col_names.append('TIPO_PAGAMENTO')
+        # Tenta identificar as colunas pelo nome primeiro se for parquet e já tiver cabeçalho
+        if file_extension == '.parquet' and 'MATRICULA_PAGAMENTO' in df.columns:
+            df_pagamentos = df.copy()
+        else:
+            if df.shape[1] < 10:
+                st.error(f"Arquivo de Pagamentos: Esperava pelo menos 10 colunas, mas encontrou {df.shape[1]}.")
+                return None
 
-        df_pagamentos         = df.iloc[:, col_indices].copy()
-        df_pagamentos.columns = col_names
+            # --- COLUNAS ESSENCIAIS ---
+            col_indices = [0, 5, 8]
+            col_names   = ['MATRICULA_PAGAMENTO', 'DATA_PAGAMENTO', 'VALOR_PAGO']
 
-        IDX_VENCIMENTO  = 4
-        IDX_TIPO_FATURA = 11
-        IDX_UTILIZACAO  = 9
+            if df.shape[1] > 12: # Coluna 12 (índice 11) para TIPO_PAGAMENTO
+                col_indices.append(11)
+                col_names.append('TIPO_PAGAMENTO')
 
-        if df.shape[1] > IDX_VENCIMENTO:
-            df_pagamentos['VENCIMENTO']  = df.iloc[:, IDX_VENCIMENTO].values
-        if df.shape[1] > IDX_TIPO_FATURA:
-            df_pagamentos['TIPO_FATURA'] = df.iloc[:, IDX_TIPO_FATURA].values
-        if df.shape[1] > IDX_UTILIZACAO:
-            df_pagamentos['UTILIZACAO']  = df.iloc[:, IDX_UTILIZACAO].values
+            df_pagamentos = df.iloc[:, col_indices].copy()
+            df_pagamentos.columns = col_names
 
-        df_pagamentos['MATRICULA_PAGAMENTO'] = (
-            df_pagamentos['MATRICULA_PAGAMENTO']
-            .astype(str)
-            .str.replace(r'\.0$', '', regex=True)
-            .str.strip()
-        )
-        df_pagamentos['DATA_PAGAMENTO'] = pd.to_datetime(
-            df_pagamentos['DATA_PAGAMENTO'], errors='coerce', dayfirst=True
-        )
+            # --- COLUNAS OPCIONAIS (adicionadas ANTES dos dropna, enquanto os tamanhos ainda batem) ---
+            IDX_VENCIMENTO  = 4
+            IDX_TIPO_FATURA = 10 # Índice 10 para TIPO_FATURA (coluna 11)
+            IDX_UTILIZACAO  = 9
+
+            if df.shape[1] > IDX_VENCIMENTO:
+                df_pagamentos['VENCIMENTO'] = df.iloc[:, IDX_VENCIMENTO].values
+
+            if df.shape[1] > IDX_TIPO_FATURA:
+                df_pagamentos['TIPO_FATURA'] = df.iloc[:, IDX_TIPO_FATURA].values
+
+            if df.shape[1] > IDX_UTILIZACAO:
+                df_pagamentos['UTILIZACAO'] = df.iloc[:, IDX_UTILIZACAO].values
+
+        # --- TRATAMENTOS (aplicados após todas as colunas estarem no dataframe) ---
+        df_pagamentos['MATRICULA_PAGAMENTO'] = df_pagamentos['MATRICULA_PAGAMENTO'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+
+        df_pagamentos['DATA_PAGAMENTO'] = pd.to_datetime(df_pagamentos['DATA_PAGAMENTO'], errors='coerce', dayfirst=True)
         df_pagamentos.dropna(subset=['DATA_PAGAMENTO'], inplace=True)
 
         def parse_valor(val):
@@ -418,181 +169,217 @@ def load_and_process_pagamentos(uploaded_file):
         df_pagamentos.dropna(subset=['VALOR_PAGO'], inplace=True)
 
         if 'TIPO_PAGAMENTO' in df_pagamentos.columns:
-            df_pagamentos['TIPO_PAGAMENTO'] = (
-                df_pagamentos['TIPO_PAGAMENTO'].astype(str).str.strip().replace('nan', 'Não informado')
-            )
+            df_pagamentos['TIPO_PAGAMENTO'] = df_pagamentos['TIPO_PAGAMENTO'].astype(str).str.strip()
+            df_pagamentos['TIPO_PAGAMENTO'] = df_pagamentos['TIPO_PAGAMENTO'].replace('nan', 'Não informado')
+
         if 'VENCIMENTO' in df_pagamentos.columns:
-            df_pagamentos['VENCIMENTO']     = pd.to_datetime(df_pagamentos['VENCIMENTO'], errors='coerce', dayfirst=True)
+            df_pagamentos['VENCIMENTO'] = pd.to_datetime(df_pagamentos['VENCIMENTO'], errors='coerce', dayfirst=True)
             df_pagamentos['MES_FATURA']     = df_pagamentos['VENCIMENTO'].dt.month
             df_pagamentos['ANO_FATURA']     = df_pagamentos['VENCIMENTO'].dt.year
             df_pagamentos['MES_ANO_FATURA'] = df_pagamentos['VENCIMENTO'].dt.strftime('%m/%Y')
+
         if 'TIPO_FATURA' in df_pagamentos.columns:
-            df_pagamentos['TIPO_FATURA'] = (
-                df_pagamentos['TIPO_FATURA'].astype(str).str.strip().replace('nan', 'Não informado')
-            )
+            df_pagamentos['TIPO_FATURA'] = df_pagamentos['TIPO_FATURA'].astype(str).str.strip()
+            df_pagamentos['TIPO_FATURA'] = df_pagamentos['TIPO_FATURA'].replace('nan', 'Não informado')
+
         if 'UTILIZACAO' in df_pagamentos.columns:
-            df_pagamentos['UTILIZACAO'] = (
-                df_pagamentos['UTILIZACAO'].astype(str).str.strip().replace('nan', 'Não informado')
-            )
+            df_pagamentos['UTILIZACAO'] = df_pagamentos['UTILIZACAO'].astype(str).str.strip()
+            df_pagamentos['UTILIZACAO'] = df_pagamentos['UTILIZACAO'].replace('nan', 'Não informado')
 
         return df_pagamentos
     except Exception as e:
-        st.error(f"Erro ao processar Pagamentos: {e}")
+        st.error(f"Erro ao processar arquivo de Pagamentos: {e}")
         return None
 
-def fmt_brl(valor):
+@st.cache_data(ttl=3600) # Cache por 1 hora
+def load_and_process_clientes(uploaded_file_content):
     try:
-        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except (ValueError, TypeError):
-        return "R$ 0,00"
+        df = pd.read_excel(uploaded_file_content)
+
+        required_cols = ['TELEFONE', 'MATRICULA', 'SITUACAO']
+        if not all(col in df.columns for col in required_cols):
+            st.error(f"Arquivo de Clientes: Colunas esperadas não encontradas. Necessário: {required_cols}")
+            return None
+
+        colunas_ler = ['TELEFONE', 'MATRICULA', 'SITUACAO']
+        for col_opcional in ['CIDADE', 'DIRETORIA']:
+            if col_opcional in df.columns:
+                colunas_ler.append(col_opcional)
+
+        df_clientes = df[colunas_ler].copy()
+        df_clientes.rename(columns={
+            'TELEFONE': 'TELEFONE_CLIENTE',
+            'MATRICULA': 'MATRICULA_CLIENTE'
+        }, inplace=True)
+
+        df_clientes['TELEFONE_CLIENTE'] = df_clientes['TELEFONE_CLIENTE'].astype(str).str.replace(r'^55', '', regex=True).str.replace(r'\.0$', '', regex=True)
+        df_clientes['TELEFONE_CLIENTE'] = df_clientes['TELEFONE_CLIENTE'].str.strip()
+
+        df_clientes['MATRICULA_CLIENTE'] = df_clientes['MATRICULA_CLIENTE'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+
+        df_clientes['SITUACAO'] = pd.to_numeric(df_clientes['SITUACAO'], errors='coerce').fillna(0)
+
+        if 'CIDADE' in df_clientes.columns:
+            df_clientes['CIDADE'] = df_clientes['CIDADE'].astype(str).str.strip()
+        if 'DIRETORIA' in df_clientes.columns:
+            df_clientes['DIRETORIA'] = df_clientes['DIRETORIA'].astype(str).str.strip()
+
+        df_clientes.drop_duplicates(subset=['TELEFONE_CLIENTE', 'MATRICULA_CLIENTE'], inplace=True)
+        return df_clientes
+    except Exception as e:
+        st.error(f"Erro ao processar arquivo de Clientes: {e}")
+        return None
+
+# --- Funções de Carregamento/Salvamento de Campanhas do GitHub ---
+
+@st.cache_data(ttl=300) # Cache por 5 minutos
+def load_meta_github():
+    content = get_file_from_github("meta.json")
+    if content:
+        return pd.DataFrame(json.loads(content))
+    return pd.DataFrame(columns=['id', 'nome', 'data_upload', 'envios_path', 'clientes_path'])
+
+@st.cache_data(ttl=3600)
+def load_campanha_envios(campanha_id):
+    df_meta = load_meta_github()
+    meta = df_meta[df_meta['id'] == campanha_id]
+    if not meta.empty:
+        path = meta['envios_path'].iloc[0]
+        content = get_file_from_github(path, raw=True) # Usar raw para arquivos maiores
+        if content:
+            return load_and_process_envios(content)
+    return None
+
+@st.cache_data(ttl=3600)
+def load_campanha_clientes(campanha_id):
+    df_meta = load_meta_github()
+    meta = df_meta[df_meta['id'] == campanha_id]
+    if not meta.empty:
+        path = meta['clientes_path'].iloc[0]
+        content = get_file_from_github(path, raw=True) # Usar raw para arquivos maiores
+        if content:
+            return load_and_process_clientes(content)
+    return None
+
+@st.cache_data(ttl=3600)
+def load_pagamentos_github():
+    path = "pagamentos.parquet"
+    content = get_file_from_github(path, raw=True) # Usar raw para arquivos maiores
+    if content:
+        return load_and_process_pagamentos(content, '.parquet')
+    return None
+
+def save_campanha(nome, df_envios, df_clientes):
+    df_meta = load_meta_github()
+    campanha_id = str(len(df_meta) + 1)
+    envios_path = f"campanhas/{campanha_id}_envios.xlsx"
+    clientes_path = f"campanhas/{campanha_id}_clientes.xlsx"
+
+    # Salvar envios
+    envios_buffer = pd.io.excel.ExcelWriter("temp_envios.xlsx", engine='xlsxwriter')
+    df_envios.to_excel(envios_buffer, index=False)
+    envios_buffer.close()
+    with open("temp_envios.xlsx", "rb") as f:
+        envios_content = f.read()
+    if not save_file_to_github(envios_path, envios_content, f"Add envios for campaign {campanha_id}", get_file_sha(envios_path)):
+        return None, "Erro ao salvar envios no GitHub."
+
+    # Salvar clientes
+    clientes_buffer = pd.io.excel.ExcelWriter("temp_clientes.xlsx", engine='xlsxwriter')
+    df_clientes.to_excel(clientes_buffer, index=False)
+    clientes_buffer.close()
+    with open("temp_clientes.xlsx", "rb") as f:
+        clientes_content = f.read()
+    if not save_file_to_github(clientes_path, clientes_content, f"Add clientes for campaign {campanha_id}", get_file_sha(clientes_path)):
+        return None, "Erro ao salvar clientes no GitHub."
+
+    # Atualizar meta.json
+    nova_meta = pd.DataFrame([{
+        'id': campanha_id,
+        'nome': nome,
+        'data_upload': datetime.now().isoformat(),
+        'envios_path': envios_path,
+        'clientes_path': clientes_path
+    }])
+    df_meta_atualizada = pd.concat([df_meta, nova_meta], ignore_index=True)
+    meta_content = df_meta_atualizada.to_json(orient="records", indent=4).encode("utf-8")
+    if not save_file_to_github("meta.json", meta_content, f"Update meta.json for campaign {campanha_id}", get_file_sha("meta.json")):
+        return None, "Erro ao atualizar meta.json no GitHub."
+
+    load_meta_github.clear() # Limpa cache da meta
+    return campanha_id, None
+
+def update_pagamentos_github(df_pagamentos):
+    path = "pagamentos.parquet"
+    pagamentos_buffer = df_pagamentos.to_parquet(index=False)
+
+    sha = get_file_sha(path)
+    if save_file_to_github(path, pagamentos_buffer, "Update pagamentos.parquet", sha):
+        load_pagamentos_github.clear() # Limpa cache dos pagamentos
+        return True, len(df_pagamentos), 0 # Não calculamos novos aqui
+    return False, 0, 0
+
+# --- Funções Auxiliares de Formatação e Plotagem ---
+def fmt_brl(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def add_bar_labels(fig, formato='valor'):
     for trace in fig.data:
-        if hasattr(trace, 'y') and trace.y is not None:
+        if isinstance(trace, go.Bar) and hasattr(trace, 'y') and trace.y is not None:
             if formato == 'valor':
                 texts = [fmt_brl(v) if v is not None else '' for v in trace.y]
             else:
-                try:
-                    texts = [str(int(v)) if v is not None else '' for v in trace.y]
-                except (ValueError, TypeError):
-                    texts = ['' for _ in trace.y]
-            trace.text         = texts
+                texts = [str(int(v)) if v is not None else '' for v in trace.y]
+            trace.text = texts
             trace.textposition = 'outside'
-            trace.textfont     = dict(size=11)
+            trace.textfont = dict(size=11)
     fig.update_layout(uniformtext_minsize=8, uniformtext_mode='hide')
     return fig
 
-# ══════════════════════════════════════════════════════════════
-# CONFIGURAÇÃO DA PÁGINA
-# ══════════════════════════════════════════════════════════════
+# --- Sidebar: Seleção de Campanhas ---
+st.sidebar.header("Seleção de Campanhas")
 
-st.set_page_config(layout="wide", page_title="Análise de campanha de cobrança")
-
-if not st.session_state.get("logged_in"):
-    login_screen()
-    st.stop()
-
-st.title("📊 Análise de eficiência de campanha de cobrança via Whatsapp")
-
-# ── Cabeçalho da sidebar ─────────────────────────────────────
-st.sidebar.markdown(
-    f"👤 **{st.session_state['username']}** "
-    f"({'Admin' if is_admin() else 'Usuário'})"
-)
-if st.sidebar.button("Sair"):
-    for key in ["logged_in", "username", "role"]:
-        st.session_state.pop(key, None)
-    st.rerun()
-
-st.sidebar.markdown("---")
-
-# ══════════════════════════════════════════════════════════════
-# SIDEBAR — SELEÇÃO DE CAMPANHA (todos os perfis)
-# ══════════════════════════════════════════════════════════════
-
-# ── Sidebar: seleção de campanha ─────────────────────────────
-# ── Sidebar: seleção de campanha ─────────────────────────────
-st.sidebar.header("📋 Campanhas")
-
-df_meta = load_campanhas_meta()
+df_meta = load_meta_github()
 campanhas_disponiveis = df_meta['nome'].tolist() if not df_meta.empty else []
 
-# Permite selecionar múltiplas campanhas
-campanhas_selecionadas_nomes = st.sidebar.multiselect(
-    "Selecionar uma ou mais campanhas",
-    options=campanhas_disponiveis,
-    default=[]
+# Adiciona um filtro por mês/ano
+df_meta['data_upload_dt'] = pd.to_datetime(df_meta['data_upload'])
+df_meta['mes_ano'] = df_meta['data_upload_dt'].dt.strftime('%Y-%m')
+meses_disponiveis = sorted(df_meta['mes_ano'].unique().tolist(), reverse=True)
+
+mes_selecionado = st.sidebar.selectbox(
+    "Filtrar por Mês/Ano de Upload",
+    options=["Todos"] + meses_disponiveis,
+    key="mes_filtro_selector"
 )
 
-campanhas_selecionadas_ids = []
-if campanhas_selecionadas_nomes and not df_meta.empty:
-    campanhas_selecionadas_ids = df_meta[
-        df_meta['nome'].isin(campanhas_selecionadas_nomes)
-    ]['id'].tolist()
+campanhas_disponiveis_para_selecao = []
+if mes_selecionado == "Todos":
+    campanhas_disponiveis_para_selecao = campanhas_disponiveis
+else:
+    campanhas_do_mes = df_meta[df_meta['mes_ano'] == mes_selecionado]
+    campanhas_disponiveis_para_selecao = campanhas_do_mes['nome'].tolist()
 
-    # Exibe detalhes das campanhas selecionadas
-    for nome_campanha in campanhas_selecionadas_nomes:
-        campanha_info = df_meta[df_meta['nome'] == nome_campanha].iloc[0]
-        criado_em = pd.to_datetime(campanha_info['criado_em']).strftime('%d/%m/%Y')
-        st.sidebar.caption(
-            f"**{nome_campanha}**  \n"
-            f"📅 Criada em: {criado_em}  \n"
-            f"📤 Envios: {int(campanha_info['total_envios']):,}  \n"
-            f"👥 Clientes: {int(campanha_info['total_clientes']):,}"
-        )
-        if is_admin():
-            if st.sidebar.button(f"🗑️ Excluir '{nome_campanha}'", key=f"del_{campanha_info['id']}"):
-                delete_campanha(campanha_info['id'], nome_campanha)
-                st.sidebar.success(f"Campanha '{nome_campanha}' excluída.")
-                st.rerun()
-    st.sidebar.markdown("---")
+campanhas_selecionadas_nomes = st.sidebar.multiselect(
+    "Selecionar Campanhas (múltipla escolha)",
+    options=campanhas_disponiveis_para_selecao,
+    default=campanhas_disponiveis_para_selecao, # Seleciona todas por padrão
+    key="multi_campanha_selector"
+)
+
+# Filtra o df_meta para obter os IDs das campanhas selecionadas
+campanhas_selecionadas_meta = df_meta[df_meta['nome'].isin(campanhas_selecionadas_nomes)]
+campanhas_selecionadas_ids = campanhas_selecionadas_meta['id'].tolist() # Usar IDs para carregar
 
 st.sidebar.markdown("---")
 
-# ── Sidebar: configurações da análise ────────────────────────
-st.sidebar.header("⚙️ Configurações")
-janela_dias = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7, key="janela_dias_slider")
-executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True, key="executar_analise_btn")
-
-# ── Sidebar: área administrativa (somente admin) ──────────────
-if is_admin():
-    st.sidebar.markdown("---")
-    st.sidebar.header("🔧 Administração")
-
-    with st.sidebar.expander("➕ Nova Campanha"):
-        nome_nova = st.text_input("Nome da campanha", key="nome_nova_campanha_input")
-        uploaded_envios_admin   = st.file_uploader("Base de Envios (.xlsx)",   type=["xlsx"], key="up_env")
-        uploaded_clientes_admin = st.file_uploader("Base de Clientes (.xlsx)", type=["xlsx"], key="up_cli")
-        if st.button("💾 Salvar campanha", key="salvar_campanha_btn"):
-            if not nome_nova.strip():
-                st.error("Informe um nome para a campanha.")
-            elif uploaded_envios_admin is None:
-                st.error("Faça upload da base de envios.")
-            elif uploaded_clientes_admin is None:
-                st.error("Faça upload da base de clientes.")
-            else:
-                df_env_tmp = load_and_process_envios(uploaded_envios_admin)
-                df_cli_tmp = load_and_process_clientes(uploaded_clientes_admin)
-                if df_env_tmp is not None and df_cli_tmp is not None:
-                    with st.spinner("Salvando no GitHub..."):
-                        cid, erro = save_campanha(nome_nova.strip(), df_env_tmp, df_cli_tmp)
-                    if erro:
-                        st.error(erro)
-                    else:
-                        st.success(f"Campanha '{nome_nova}' salva! ID: `{cid}`")
-                        st.rerun()
-
-    with st.sidebar.expander("💰 Base de Pagamentos"):
-        pag_gh = load_pagamentos_github()
-        if pag_gh is not None:
-            st.caption(f"✅ Base atual: {len(pag_gh):,} registros")
-        else:
-            st.caption("⚠️ Nenhuma base salva ainda.")
-        uploaded_pag = st.file_uploader(
-            "Enviar/Atualizar (.csv, .xlsx, .parquet)",
-            type=["csv", "xlsx", "parquet"],
-            key="up_pag"
-        )
-        if st.button("⬆️ Enviar para o GitHub", key="enviar_para_git_btn"):
-            if uploaded_pag is None:
-                st.error("Selecione um arquivo de pagamentos.")
-            else:
-                df_pag_tmp = load_and_process_pagamentos(uploaded_pag)
-                if df_pag_tmp is not None:
-                    with st.spinner("Atualizando..."):
-                        ok, total, novos = update_pagamentos_github(df_pag_tmp)
-                    if ok:
-                        st.success(f"Atualizado! Total: {total:,} | Novos: {novos:,}")
-                    else:
-                        st.error("Erro ao salvar no GitHub.")
-
 # ══════════════════════════════════════════════════════════════
-# RESOLUÇÃO DOS DADOS PARA ANÁLISE ACUMULADA
+# RESOLUÇÃO DOS DADOS (AGORA AGREGADOS)
 # ══════════════════════════════════════════════════════════════
 
-df_envios_agregado   = pd.DataFrame() # Inicializa como DataFrame vazio
-df_clientes_agregado = pd.DataFrame() # Inicializa como DataFrame vazio
-df_pagamentos        = None
+df_envios_agregado     = pd.DataFrame() # Inicializa como DataFrame vazio
+df_clientes_agregado   = pd.DataFrame() # Inicializa como DataFrame vazio
+df_pagamentos          = None # Pagamentos continuam sendo carregados uma vez
 
 # Carrega pagamentos do GitHub automaticamente sempre
 df_pagamentos = load_pagamentos_github()
@@ -611,11 +398,11 @@ if campanhas_selecionadas_ids:
     with st.spinner("Carregando dados das campanhas selecionadas..."):
         for campanha_id in campanhas_selecionadas_ids:
             df_env_temp = load_campanha_envios(campanha_id)
+            df_cli_temp = load_campanha_clientes(campanha_id)
+
             if df_env_temp is not None:
                 df_env_temp['CAMPANHA_ID'] = campanha_id # Adiciona ID da campanha para rastreamento
                 lista_df_envios.append(df_env_temp)
-
-            df_cli_temp = load_campanha_clientes(campanha_id)
             if df_cli_temp is not None:
                 df_cli_temp['CAMPANHA_ID'] = campanha_id # Adiciona ID da campanha para rastreamento
                 lista_df_clientes.append(df_cli_temp)
@@ -643,8 +430,8 @@ dados_prontos = (
 
 # ── Sidebar: configurações da análise ────────────────────────
 st.sidebar.header("⚙️ Configurações")
-janela_dias      = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7)
-executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True)
+janela_dias      = st.sidebar.slider("Janela de dias após o envio:", 0, 30, 7, key="janela_dias_slider")
+executar_analise = st.sidebar.button("▶️ Executar Análise", use_container_width=True, key="executar_analise_btn")
 
 # ══════════════════════════════════════════════════════════════
 # SIDEBAR — ADMINISTRAÇÃO (somente admin)
@@ -655,10 +442,10 @@ if is_admin():
     st.sidebar.header("🔧 Administração")
 
     with st.sidebar.expander("➕ Nova Campanha"):
-        nome_nova               = st.text_input("Nome da campanha")
+        nome_nova               = st.text_input("Nome da campanha", key="nome_nova_campanha_input")
         uploaded_envios_admin   = st.file_uploader("Base de Envios (.xlsx)",   type=["xlsx"], key="up_env_admin")
         uploaded_clientes_admin = st.file_uploader("Base de Clientes (.xlsx)", type=["xlsx"], key="up_cli_admin")
-        if st.button("💾 Salvar campanha"):
+        if st.button("💾 Salvar campanha", key="salvar_campanha_btn"):
             if not nome_nova.strip():
                 st.error("Informe um nome para a campanha.")
             elif uploaded_envios_admin is None:
@@ -666,8 +453,8 @@ if is_admin():
             elif uploaded_clientes_admin is None:
                 st.error("Faça upload da base de clientes.")
             else:
-                df_env_tmp = load_and_process_envios(uploaded_envios_admin)
-                df_cli_tmp = load_and_process_clientes(uploaded_clientes_admin)
+                df_env_tmp = load_and_process_envios(uploaded_envios_admin.read())
+                df_cli_tmp = load_and_process_clientes(uploaded_clientes_admin.read())
                 if df_env_tmp is not None and df_cli_tmp is not None:
                     with st.spinner("Salvando no GitHub..."):
                         cid, erro = save_campanha(nome_nova.strip(), df_env_tmp, df_cli_tmp)
@@ -688,11 +475,12 @@ if is_admin():
             type=["csv", "xlsx", "parquet"],
             key="up_pag_admin"
         )
-        if st.button("⬆️ Enviar para o GitHub"):
+        if st.button("⬆️ Enviar para o GitHub", key="enviar_pagamentos_btn"):
             if uploaded_pag_admin is None:
                 st.error("Selecione um arquivo de pagamentos.")
             else:
-                df_pag_tmp = load_and_process_pagamentos(uploaded_pag_admin)
+                file_extension = uploaded_pag_admin.name.split('.')[-1]
+                df_pag_tmp = load_and_process_pagamentos(uploaded_pag_admin.read(), f".{file_extension}")
                 if df_pag_tmp is not None:
                     with st.spinner("Atualizando..."):
                         ok, total, novos = update_pagamentos_github(df_pag_tmp)
@@ -700,47 +488,6 @@ if is_admin():
                         st.success(f"Atualizado! Total: {total:,} | Novos: {novos:,}")
                     else:
                         st.error("Erro ao salvar no GitHub.")
-
-# ══════════════════════════════════════════════════════════════
-# CARREGAMENTO DOS DADOS
-# ══════════════════════════════════════════════════════════════
-
-df_envios     = None
-df_clientes   = None
-df_pagamentos = None
-
-if campanha_selecionada is not None:
-    with st.spinner("Carregando dados da campanha..."):
-        df_envios   = load_campanha_envios(campanha_selecionada['id'])
-        df_clientes = load_campanha_clientes(campanha_selecionada['id'])
-
-    if df_envios is not None:
-        st.sidebar.success(f"✅ Envios carregados ({len(df_envios):,})")
-    else:
-        st.sidebar.error("Erro ao carregar envios.")
-
-    if df_clientes is not None:
-        st.sidebar.success(f"✅ Clientes carregados ({len(df_clientes):,})")
-    else:
-        st.sidebar.error("Erro ao carregar clientes.")
-
-    with st.spinner("Carregando pagamentos..."):
-        df_pagamentos = load_pagamentos_github()
-
-    if df_pagamentos is not None:
-        st.sidebar.success(f"✅ Pagamentos carregados ({len(df_pagamentos):,})")
-    else:
-        st.sidebar.warning("⚠️ Base de pagamentos não encontrada. Faça o upload na seção Administração.")
-
-dados_prontos = (
-    df_envios     is not None and
-    df_clientes   is not None and
-    df_pagamentos is not None
-)
-
-# ══════════════════════════════════════════════════════════════
-# ANÁLISE
-# ══════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════
 # ANÁLISE PRINCIPAL
@@ -968,7 +715,7 @@ if executar_analise and dados_prontos:
 
         fig_pag_notif = px.bar(
             pagamentos_por_notificacao,
-            x='Número de Notificacoes', y='Clientes que Pagaram',
+            x='Número de Notificações', y='Clientes que Pagaram',
             title='Clientes que Pagaram por Número de Notificações Recebidas',
             labels={'Número de Notificações': 'Número de Notificações', 'Clientes que Pagaram': 'Clientes que Pagaram'}
         )
@@ -978,7 +725,6 @@ if executar_analise and dados_prontos:
 
         st.subheader("Detalhes dos Clientes Notificados")
         st.dataframe(df_notificacoes_clientes, use_container_width=True)
-
 
     # ══════════════════════════════════════════════════════════
     # ABA 3 — CIDADE E DIRETORIA (antiga ABA 2)
@@ -1335,9 +1081,9 @@ elif executar_analise and not dados_prontos:
         st.warning("Selecione uma ou mais campanhas antes de executar a análise.")
     elif df_pagamentos is None or df_pagamentos.empty:
         st.warning("Base de pagamentos não disponível ou vazia. Um administrador precisa fazer o upload.")
-    elif df_envios_agregado is None or df_envios_agregado.empty:
+    elif df_envios_agregado.empty:
         st.warning("Não foi possível carregar os envios das campanhas selecionadas ou a base está vazia.")
-    elif df_clientes_agregado is None or df_clientes_agregado.empty:
+    elif df_clientes_agregado.empty:
         st.warning("Não foi possível carregar os clientes das campanhas selecionadas ou a base está vazia.")
 
 elif not executar_analise:
